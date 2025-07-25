@@ -45,6 +45,7 @@ mod metadata_update;
 mod raw_event;
 mod register_event;
 mod register_model;
+mod register_model_with_schema;
 mod store_del_record;
 mod store_set_record;
 mod store_transaction;
