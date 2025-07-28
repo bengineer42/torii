@@ -2,15 +2,16 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use async_trait::async_trait;
 use dojo_types::naming::compute_selector_from_names;
-use dojo_types::schema::Ty;
+use dojo_world::contracts::abigen::model::Layout;
 use dojo_world::contracts::abigen::world::Event as WorldEvent;
-use dojo_world::contracts::model::{ModelRPCReader, ModelReader};
-use starknet::core::types::{BlockId, Event};
+use dojo_world::contracts::model::ModelError;
+use starknet::core::types::Event;
 use starknet::providers::Provider;
 use torii_proto::Model;
 use tracing::{debug, info};
 
 use crate::error::Error;
+use crate::schema::parse_struct_to_schema_with_namespace;
 use crate::task_manager::TaskId;
 use crate::{EventProcessor, EventProcessorContext};
 
@@ -25,7 +26,7 @@ where
     P: Provider + Send + Sync + std::fmt::Debug + 'static,
 {
     fn event_key(&self) -> String {
-        "ModelRegisteredWithIntrospect".to_string()
+        "ModelWithSchemaRegistered".to_string()
     }
 
     // We might not need this anymore, since we don't have fallback and all world events must
@@ -43,7 +44,7 @@ where
                 <RegisterModelWithSchemaProcessor as EventProcessor<P>>::event_key(self)
             )
         }) {
-            WorldEvent::ModelRegistered(e) => compute_selector_from_names(
+            WorldEvent::ModelWithSchemaRegistered(e) => compute_selector_from_names(
                 &e.namespace.to_string().unwrap(),
                 &e.name.to_string().unwrap(),
             ),
@@ -66,7 +67,7 @@ where
                 <RegisterModelWithSchemaProcessor as EventProcessor<P>>::event_key(self)
             )
         }) {
-            WorldEvent::ModelRegistered(e) => e,
+            WorldEvent::ModelWithSchemaRegistered(e) => e,
             _ => {
                 unreachable!()
             }
@@ -83,34 +84,19 @@ where
             return Ok(());
         }
 
-        let mut model = ModelRPCReader::new(
-            &namespace,
-            &name,
-            event.address.0,
-            event.class_hash.0,
-            &ctx.world,
-        )
-        .await;
-        if ctx.config.strict_model_reader {
-            model.set_block(BlockId::Number(ctx.block_number)).await;
-        }
-        let mut schema = model.schema().await?;
-        match &mut schema {
-            Ty::Struct(struct_ty) => {
-                struct_ty.name = format!("{}-{}", namespace, struct_ty.name);
-            }
-            _ => unreachable!(),
-        }
-        let layout = model.layout().await?;
-
-        let unpacked_size: u32 = model.unpacked_size().await?;
-        let packed_size: u32 = model.packed_size().await?;
+        let schema = parse_struct_to_schema_with_namespace(&event.schema, &namespace, &name)
+            .map_err(ModelError::Parse)?;
+        let packed_size = 0;
+        let unpacked_size = 0;
+        let class_hash = 0.into();
+        let contract_address = 0.into();
+        let layout = Layout::Fixed(vec![]);
 
         info!(
             target: LOG_TARGET,
             namespace = %namespace,
             name = %name,
-            "Registered model."
+            "Registered model with Schema."
         );
 
         debug!(
@@ -118,20 +104,20 @@ where
             name,
             schema = ?schema,
             layout = ?layout,
-            class_hash = ?event.class_hash,
-            contract_address = ?event.address,
+            class_hash = ?class_hash,
+            contract_address = ?contract_address,
             packed_size = %packed_size,
             unpacked_size = %unpacked_size,
             "Registered model content."
         );
 
         ctx.storage
-            .register_model_with_schema(
+            .register_model(
                 selector,
                 &schema,
                 &layout,
-                event.class_hash.into(),
-                event.address.into(),
+                class_hash,
+                contract_address,
                 packed_size,
                 unpacked_size,
                 ctx.block_timestamp,
@@ -141,14 +127,14 @@ where
             .await?;
 
         ctx.cache
-            .register_model_with_schema(
+            .register_model(
                 selector,
                 Model {
                     selector,
                     namespace,
                     name,
-                    class_hash: event.class_hash.into(),
-                    contract_address: event.address.into(),
+                    class_hash: class_hash.into(),
+                    contract_address: contract_address.into(),
                     packed_size,
                     unpacked_size,
                     layout,

@@ -39,11 +39,11 @@ cainome = { git = "https://github.com/Larkooo/cainome", branch = "patch-1" }
 cainome-cairo-serde = { git = "https://github.com/Larkooo/cainome", branch = "patch-1" }
 cainome-cairo-serde-derive = { git = "https://github.com/Larkooo/cainome", branch = "patch-1" }
 
-dojo-utils = { git = "https://github.com/bengineer42/dojo", branch = "add-model-schema-event" }
-dojo-types = { git = "https://github.com/bengineer42/dojo", branch = "add-model-schema-event" }
-dojo-world = { git = "https://github.com/bengineer42/dojo", branch = "add-model-schema-event" }
-dojo-test-utils = { git = "https://github.com/bengineer42/dojo", branch = "add-model-schema-event" }
-dojo-metrics = { git = "https://github.com/bengineer42/dojo", branch = "add-model-schema-event" }
+dojo-utils = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
+dojo-types = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
+dojo-world = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
+dojo-test-utils = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
+dojo-metrics = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
 
 # torii
 torii-broker = { path = "crates/broker" }
@@ -136,9 +136,9 @@ ipfs-api-backend-hyper = { git = "https://github.com/ferristseng/rust-ipfs-api",
 ] }
 mime_guess = "2.0"
 
-sozo-scarbext = { git = "https://github.com/dojoengine/dojo", rev = "054623b" }
+sozo-scarbext = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
 scarb = { git = "https://github.com/dojoengine/scarb", rev = "38f13cb6f9f33836a61b231f7e00c5c4dc5cafd6" }
-sozo-ops = { git = "https://github.com/bengineer42/dojo", branch = "add-model-schema-event" }
+sozo-ops = { git = "https://github.com/bengineer42/dojo", branch = "old-dojo-models" }
 katana-runner = { git = "https://github.com/dojoengine/katana", rev = "f472095" }
 
 

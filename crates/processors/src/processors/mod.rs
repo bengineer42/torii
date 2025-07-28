@@ -16,6 +16,7 @@ use metadata_update::MetadataUpdateProcessor;
 use raw_event::RawEventProcessor;
 use register_event::RegisterEventProcessor;
 use register_model::RegisterModelProcessor;
+use register_model_with_schema::RegisterModelWithSchemaProcessor;
 use starknet::core::types::Felt;
 use starknet::{core::utils::get_selector_from_name, providers::Provider};
 use store_del_record::StoreDelRecordProcessor;
@@ -87,6 +88,7 @@ impl<P: Provider + Send + Sync + std::fmt::Debug + 'static> Processors<P> {
                 ContractType::WORLD,
                 vec![
                     Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,

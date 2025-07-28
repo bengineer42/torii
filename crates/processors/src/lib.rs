@@ -14,6 +14,7 @@ mod erc;
 pub mod error;
 pub mod fetch;
 pub mod processors;
+pub mod schema;
 pub mod task_manager;
 
 use crate::error::Error;
