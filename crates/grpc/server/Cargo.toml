@@ -14,7 +14,6 @@ rayon.workspace = true
 starknet.workspace = true
 starknet-crypto.workspace = true
 thiserror.workspace = true
-torii-sqlite = { workspace = true }
 torii-broker = { workspace = true }
 torii-proto = { workspace = true, features = ["server"] }
 torii-messaging = { workspace = true }
@@ -48,6 +47,7 @@ torii-storage.workspace = true
 torii-cache.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 cainome.workspace = true
 camino.workspace = true
 dojo-test-utils.workspace = true
@@ -64,6 +64,7 @@ torii-libp2p-relay = { workspace = true }
 indexmap.workspace = true
 torii-cache.workspace = true
 starknet-core.workspace = true
+torii-sqlite.workspace = true
 
 [build-dependencies]
 tonic-build.workspace = true

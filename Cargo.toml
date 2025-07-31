@@ -22,7 +22,7 @@ edition = "2021"
 license = "Apache-2.0"
 license-file = "LICENSE"
 repository = "https://github.com/dojoengine/torii"
-version = "1.6.0-alpha.3"
+version = "1.6.0"
 
 [profile.performance]
 codegen-units = 1
@@ -90,10 +90,8 @@ hashlink = "0.9.1"
 http = "0.2.9"
 image = "0.25.2"
 indexmap = "2.2.5"
-lazy_static = "1.4.0"
 metrics = "0.23.0"
 num-traits = { version = "0.2", default-features = false }
-once_cell = "1.0"
 parking_lot = "0.12.1"
 rand = "0.8.5"
 rayon = "1.8.0"

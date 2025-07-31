@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use std::pin::Pin;
 use std::str;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use crypto_bigint::U256;
@@ -59,7 +60,20 @@ use torii_proto::Message;
 
 use anyhow::{anyhow, Error};
 
-#[derive(Debug, Clone)]
+// Shared subscription runtime for all DojoWorld instances
+// This provides performance isolation from user-facing API requests
+// Subscriptions involve heavy polling and should not starve API response threads
+static SUBSCRIPTION_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
+    let worker_threads = (num_cpus::get() / 2).clamp(2, 8);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_name("torii-grpc-subscriptions")
+        .enable_all()
+        .build()
+        .expect("Failed to create subscriptions runtime")
+});
+
+#[derive(Debug)]
 pub struct DojoWorld<P: Provider + Sync> {
     storage: Arc<dyn Storage>,
     provider: Arc<P>,
@@ -83,42 +97,41 @@ impl<P: Provider + Sync> DojoWorld<P> {
         cross_messaging_tx: Option<UnboundedSender<Message>>,
         config: GrpcConfig,
     ) -> Self {
-        let entity_manager = Arc::new(EntityManager::new(config.subscription_buffer_size));
-        let event_message_manager =
-            Arc::new(EventMessageManager::new(config.subscription_buffer_size));
-        let event_manager = Arc::new(EventManager::new(config.subscription_buffer_size));
-        let indexer_manager = Arc::new(IndexerManager::new(config.subscription_buffer_size));
-        let token_balance_manager =
-            Arc::new(TokenBalanceManager::new(config.subscription_buffer_size));
-        let token_manager = Arc::new(TokenManager::new(config.subscription_buffer_size));
-        let transaction_manager =
-            Arc::new(TransactionManager::new(config.subscription_buffer_size));
+        let entity_manager = Arc::new(EntityManager::new(config.clone()));
+        let event_message_manager = Arc::new(EventMessageManager::new(config.clone()));
+        let event_manager = Arc::new(EventManager::new(config.clone()));
+        let indexer_manager = Arc::new(IndexerManager::new(config.clone()));
+        let token_balance_manager = Arc::new(TokenBalanceManager::new(config.clone()));
+        let token_manager = Arc::new(TokenManager::new(config.clone()));
+        let transaction_manager = Arc::new(TransactionManager::new(config.clone()));
 
-        tokio::task::spawn(subscriptions::entity::Service::new(Arc::clone(
+        // Spawn subscription services on the dedicated subscription runtime
+        // These services do heavy polling and should be isolated from API request handling
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::entity::Service::new(Arc::clone(
             &entity_manager,
         )));
 
-        tokio::task::spawn(subscriptions::event_message::Service::new(Arc::clone(
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::event_message::Service::new(Arc::clone(
             &event_message_manager,
         )));
 
-        tokio::task::spawn(subscriptions::event::Service::new(Arc::clone(
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::event::Service::new(Arc::clone(
             &event_manager,
         )));
 
-        tokio::task::spawn(subscriptions::indexer::Service::new(Arc::clone(
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::indexer::Service::new(Arc::clone(
             &indexer_manager,
         )));
 
-        tokio::task::spawn(subscriptions::token_balance::Service::new(Arc::clone(
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::token_balance::Service::new(Arc::clone(
             &token_balance_manager,
         )));
 
-        tokio::task::spawn(subscriptions::token::Service::new(Arc::clone(
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::token::Service::new(Arc::clone(
             &token_manager,
         )));
 
-        tokio::task::spawn(subscriptions::transaction::Service::new(Arc::clone(
+        SUBSCRIPTION_RUNTIME.spawn(subscriptions::transaction::Service::new(Arc::clone(
             &transaction_manager,
         )));
 
@@ -267,11 +280,7 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
             .transpose()
             .map_err(|e: ProtoError| Status::internal(e.to_string()))?;
 
-        let rx = self
-            .transaction_manager
-            .add_subscriber(filter)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let rx = self.transaction_manager.add_subscriber(filter).await;
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeTransactionsStream
         ))
@@ -432,8 +441,7 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
         let rx = self
             .token_manager
             .add_subscriber(contract_addresses, token_ids)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .await;
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeTokensStream
         ))
@@ -497,6 +505,7 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
             )
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
+
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeIndexerStream
         ))
@@ -512,11 +521,7 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
             .transpose()
             .map_err(|e: ProtoError| Status::internal(e.to_string()))?;
 
-        let rx = self
-            .entity_manager
-            .add_subscriber(clause)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let rx = self.entity_manager.add_subscriber(clause).await;
 
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeEntitiesStream
@@ -567,8 +572,8 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
         let rx = self
             .token_balance_manager
             .add_subscriber(contract_addresses, account_addresses, token_ids)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .await;
+
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeTokenBalancesStream
         ))
@@ -617,11 +622,7 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
             .map(|c| c.try_into())
             .transpose()
             .map_err(|e: ProtoError| Status::internal(e.to_string()))?;
-        let rx = self
-            .event_message_manager
-            .add_subscriber(clause)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let rx = self.event_message_manager.add_subscriber(clause).await;
 
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeEntitiesStream
@@ -655,8 +656,7 @@ impl<P: Provider + Sync + Send + 'static> proto::world::world_server::World for 
         let rx = self
             .event_manager
             .add_subscriber(keys.into_iter().map(|keys| keys.into()).collect())
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .await;
 
         Ok(Response::new(
             Box::pin(ReceiverStream::new(rx)) as Self::SubscribeEventsStream
@@ -749,12 +749,20 @@ const DEFAULT_ALLOW_HEADERS: [&str; 6] = [
 #[derive(Clone, Debug)]
 pub struct GrpcConfig {
     pub subscription_buffer_size: usize,
+    pub optimistic: bool,
+    pub tcp_keepalive_interval: Duration,
+    pub http2_keepalive_interval: Duration,
+    pub http2_keepalive_timeout: Duration,
 }
 
 impl Default for GrpcConfig {
     fn default() -> Self {
         Self {
             subscription_buffer_size: 1000,
+            optimistic: false,
+            tcp_keepalive_interval: Duration::from_secs(60),
+            http2_keepalive_interval: Duration::from_secs(30),
+            http2_keepalive_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -781,6 +789,11 @@ pub async fn new<P: Provider + Sync + Send + 'static>(
         .build()
         .unwrap();
 
+    // Extract keepalive settings before moving config
+    let tcp_keepalive = config.tcp_keepalive_interval;
+    let http2_keepalive_interval = config.http2_keepalive_interval;
+    let http2_keepalive_timeout = config.http2_keepalive_timeout;
+
     let world = DojoWorld::new(
         storage,
         provider,
@@ -795,6 +808,14 @@ pub async fn new<P: Provider + Sync + Send + 'static>(
     let server_future = Server::builder()
         // GrpcWeb is over http1 so we must enable it.
         .accept_http1(true)
+        // Configure keepalive for long-lived streaming connections
+        .tcp_keepalive(Some(tcp_keepalive))
+        .http2_keepalive_interval(Some(http2_keepalive_interval))
+        .http2_keepalive_timeout(Some(http2_keepalive_timeout))
+        .initial_stream_window_size(Some(1024 * 1024))
+        .initial_connection_window_size(Some(1024 * 1024 * 10))
+        // Should be enabled by default.
+        .tcp_nodelay(true)
         .layer(
             CorsLayer::new()
                 .allow_origin(AllowOrigin::mirror_request())

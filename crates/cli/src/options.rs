@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::time::Duration;
 
 use anyhow::Context;
 use camino::Utf8PathBuf;
@@ -8,8 +9,8 @@ use merge_options::MergeOptions;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use starknet::core::types::Felt;
+use torii_proto::{Contract, ContractType};
 use torii_sqlite_types::{Hook, HookEvent, ModelIndices};
-use torii_storage::types::{Contract, ContractType};
 
 pub const DEFAULT_HTTP_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
@@ -24,6 +25,9 @@ pub const DEFAULT_RELAY_PORT: u16 = 9090;
 pub const DEFAULT_RELAY_WEBRTC_PORT: u16 = 9091;
 pub const DEFAULT_RELAY_WEBSOCKET_PORT: u16 = 9092;
 pub const DEFAULT_GRPC_SUBSCRIPTION_BUFFER_SIZE: usize = 256;
+pub const DEFAULT_GRPC_TCP_KEEPALIVE_SECS: u64 = 60;
+pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS: u64 = 30;
+pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 10;
 
 pub const DEFAULT_ERC_MAX_METADATA_TASKS: usize = 100;
 pub const DEFAULT_DATABASE_WAL_AUTO_CHECKPOINT: u64 = 10000;
@@ -166,6 +170,14 @@ pub struct IndexingOptions {
     )]
     pub namespaces: Vec<String>,
 
+    /// Models to index
+    #[arg(
+        long = "indexing.models",
+        value_delimiter = ',',
+        help = "The models of the world that torii should index. If empty, all models will be indexed."
+    )]
+    pub models: Vec<String>,
+
     /// The block number to start indexing the world from.
     ///
     /// Warning: In the current implementation, this will break the indexing of tokens, if any.
@@ -216,6 +228,7 @@ impl Default for IndexingOptions {
             transactions: false,
             contracts: vec![],
             namespaces: vec![],
+            models: vec![],
             world_block: 0,
             controllers: false,
             strict_model_reader: false,
@@ -507,6 +520,67 @@ pub struct GrpcOptions {
         help = "The buffer size for the subscription channel."
     )]
     pub subscription_buffer_size: usize,
+
+    /// Whether or not to broadcast optimistic updates to the subscribers.
+    #[arg(
+        long = "grpc.optimistic",
+        default_value_t = false,
+        help = "Whether or not to broadcast optimistic updates to the subscribers. If enabled, \
+                the subscribers will receive optimistic updates for the events that are not yet \
+                committed to the database."
+    )]
+    pub optimistic: bool,
+
+    /// TCP keepalive interval in seconds. Set to 0 to disable.
+    #[arg(
+        long = "grpc.tcp_keepalive_interval",
+        default_value_t = DEFAULT_GRPC_TCP_KEEPALIVE_SECS,
+        help = "TCP keepalive interval in seconds for gRPC connections. Set to 0 to disable TCP keepalive."
+    )]
+    pub tcp_keepalive_interval: u64,
+
+    /// HTTP/2 keepalive interval in seconds. Set to 0 to disable.
+    #[arg(
+        long = "grpc.http2_keepalive_interval",
+        default_value_t = DEFAULT_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS,
+        help = "HTTP/2 keepalive interval in seconds for gRPC connections. Set to 0 to disable HTTP/2 keepalive."
+    )]
+    pub http2_keepalive_interval: u64,
+
+    /// HTTP/2 keepalive timeout in seconds.
+    #[arg(
+        long = "grpc.http2_keepalive_timeout",
+        default_value_t = DEFAULT_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS,
+        help = "HTTP/2 keepalive timeout in seconds for gRPC connections. How long to wait for keepalive ping responses."
+    )]
+    pub http2_keepalive_timeout: u64,
+}
+
+impl GrpcOptions {
+    /// Convert GrpcOptions to Duration values for gRPC configuration
+    pub fn tcp_keepalive_duration(&self) -> Option<Duration> {
+        if self.tcp_keepalive_interval == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.tcp_keepalive_interval))
+        }
+    }
+
+    pub fn http2_keepalive_interval_duration(&self) -> Option<Duration> {
+        if self.http2_keepalive_interval == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.http2_keepalive_interval))
+        }
+    }
+
+    pub fn http2_keepalive_timeout_duration(&self) -> Option<Duration> {
+        if self.http2_keepalive_timeout == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(self.http2_keepalive_timeout))
+        }
+    }
 }
 
 // Parses clap cli argument which is expected to be in the format:
