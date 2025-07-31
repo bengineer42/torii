@@ -32,6 +32,8 @@ pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 10;
 pub const DEFAULT_ERC_MAX_METADATA_TASKS: usize = 100;
 pub const DEFAULT_DATABASE_WAL_AUTO_CHECKPOINT: u64 = 10000;
 pub const DEFAULT_DATABASE_BUSY_TIMEOUT: u64 = 60_000;
+pub const DEFAULT_MESSAGING_MAX_AGE: u64 = 300;
+pub const DEFAULT_MESSAGING_FUTURE_TOLERANCE: u64 = 60;
 
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
 #[serde(default)]
@@ -155,7 +157,7 @@ pub struct IndexingOptions {
         long = "indexing.contracts",
         value_delimiter = ',',
         value_parser = parse_erc_contract,
-        help = "ERC contract addresses to index. You may only specify ERC20 or ERC721 contracts."
+        help = "The list of contracts to index, in the following format: contract_type:address. Supported contract types include ERC20, ERC721, ERC1155, WORLD, UDC."
     )]
     #[serde(deserialize_with = "deserialize_contracts")]
     #[serde(serialize_with = "serialize_contracts")]
@@ -362,6 +364,45 @@ impl Default for ErcOptions {
         Self {
             max_metadata_tasks: DEFAULT_ERC_MAX_METADATA_TASKS,
             artifacts_path: None,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
+#[serde(default)]
+#[command(next_help_heading = "Messaging options")]
+pub struct MessagingOptions {
+    /// Maximum age in seconds for message timestamps to be considered valid
+    #[arg(
+        long = "messaging.max_age",
+        default_value_t = DEFAULT_MESSAGING_MAX_AGE,
+        help = "Maximum age in seconds for message timestamps to be considered valid. Messages older than this will be rejected."
+    )]
+    pub max_age: u64,
+
+    /// Maximum seconds in the future that message timestamps are allowed
+    #[arg(
+        long = "messaging.future_tolerance",
+        default_value_t = DEFAULT_MESSAGING_FUTURE_TOLERANCE,
+        help = "Maximum seconds in the future that message timestamps are allowed. Helps prevent clock skew issues."
+    )]
+    pub future_tolerance: u64,
+
+    /// Whether timestamps are required in messages
+    #[arg(
+        long = "messaging.require_timestamp",
+        default_value_t = false,
+        help = "Whether timestamps are required in all messages. If false, timestamps are optional but validated when present."
+    )]
+    pub require_timestamp: bool,
+}
+
+impl Default for MessagingOptions {
+    fn default() -> Self {
+        Self {
+            max_age: DEFAULT_MESSAGING_MAX_AGE,
+            future_tolerance: DEFAULT_MESSAGING_FUTURE_TOLERANCE,
+            require_timestamp: false,
         }
     }
 }
@@ -667,17 +708,11 @@ fn parse_hook(part: &str) -> anyhow::Result<Hook> {
 }
 
 // Parses clap cli argument which is expected to be in the format:
-// - erc_type:address:start_block
-// - address:start_block (erc_type defaults to ERC20)
+// - contract_type:address
 fn parse_erc_contract(part: &str) -> anyhow::Result<Contract> {
     match part.split(':').collect::<Vec<&str>>().as_slice() {
         [r#type, address] => {
             let r#type = r#type.parse::<ContractType>()?;
-            if r#type == ContractType::WORLD {
-                return Err(anyhow::anyhow!(
-                    "World address cannot be specified as an ERC contract"
-                ));
-            }
 
             let address = Felt::from_str(address)
                 .with_context(|| format!("Expected address, found {}", address))?;

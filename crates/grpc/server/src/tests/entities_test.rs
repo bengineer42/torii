@@ -7,7 +7,7 @@ use dojo_test_utils::migration::copy_spawn_and_move_db;
 use dojo_types::naming::compute_selector_from_names;
 use dojo_utils::{TransactionExt, TransactionWaiter, TxnConfig};
 use dojo_world::contracts::naming::compute_bytearray_hash;
-use dojo_world::contracts::{WorldContract, WorldContractReader};
+use dojo_world::contracts::WorldContract;
 use katana_runner::RunnerCtx;
 use scarb::compiler::Profile;
 use scarb::ops;
@@ -25,6 +25,7 @@ use tonic::Request;
 use torii_cache::InMemoryCache;
 use torii_indexer::engine::{Engine, EngineConfig};
 use torii_indexer_fetcher::{Fetcher, FetcherConfig};
+use torii_messaging::{Messaging, MessagingConfig};
 use torii_processors::processors::Processors;
 use torii_proto::proto::world::world_server::World;
 use torii_proto::proto::world::RetrieveEntitiesRequest;
@@ -74,7 +75,6 @@ async fn test_entities_queries(sequencer: &RunnerCtx) {
     let provider = Arc::new(JsonRpcClient::new(HttpTransport::new(sequencer.url())));
 
     let world = WorldContract::new(world_address, &account);
-    let world_reader = WorldContractReader::new(world_address, Arc::clone(&provider));
 
     world
         .grant_writer(
@@ -131,13 +131,12 @@ async fn test_entities_queries(sequencer: &RunnerCtx) {
         r#type: ContractType::WORLD,
     }];
     let mut engine = Engine::new(
-        world_reader,
         Arc::new(db.clone()),
         cache.clone(),
         Arc::clone(&provider),
-        Processors {
+        Arc::new(Processors {
             ..Processors::default()
-        },
+        }),
         EngineConfig::default(),
         shutdown_tx,
         contracts,
@@ -155,9 +154,11 @@ async fn test_entities_queries(sequencer: &RunnerCtx) {
 
     db.execute().await.unwrap();
 
+    let messaging = Arc::new(Messaging::new(MessagingConfig::default()));
     let grpc = DojoWorld::new(
         Arc::new(db),
         provider.clone(),
+        messaging.clone(),
         world_address,
         None,
         GrpcConfig::default(),

@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::future::try_join_all;
@@ -29,13 +28,13 @@ use crate::{
 pub(crate) const LOG_TARGET: &str = "torii::indexer::fetcher";
 
 #[derive(Debug)]
-pub struct Fetcher<P: Provider + Send + Sync + std::fmt::Debug + 'static> {
-    pub provider: Arc<P>,
+pub struct Fetcher<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> {
+    pub provider: P,
     pub config: FetcherConfig,
 }
 
-impl<P: Provider + Send + Sync + std::fmt::Debug + 'static> Fetcher<P> {
-    pub fn new(provider: Arc<P>, config: FetcherConfig) -> Self {
+impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Fetcher<P> {
+    pub fn new(provider: P, config: FetcherConfig) -> Self {
         Self { config, provider }
     }
 
@@ -56,12 +55,13 @@ impl<P: Provider + Send + Sync + std::fmt::Debug + 'static> Fetcher<P> {
         debug!(target: LOG_TARGET, duration = ?range_start.elapsed(), cursors = ?cursors, "Fetched data for range.");
 
         let pending = if self.config.flags.contains(FetchingFlags::PENDING_BLOCKS)
-            && cursors
+            && range
+                .cursors
                 .values()
                 .any(|c| c.head == Some(latest_block_number))
         {
             let pending_start = Instant::now();
-            let pending_result = self.fetch_pending(latest_block, cursors).await?;
+            let pending_result = self.fetch_pending(latest_block, &range.cursors).await?;
             histogram!("torii_fetcher_pending_duration_seconds")
                 .record(pending_start.elapsed().as_secs_f64());
             pending_result
@@ -212,6 +212,11 @@ impl<P: Provider + Send + Sync + std::fmt::Debug + 'static> Fetcher<P> {
                 .insert(event.transaction_hash);
         }
 
+        // Step 7: Filter out transactions that don't have any events (not relevant to indexed contracts)
+        for (_, block) in blocks.iter_mut() {
+            block.transactions.retain(|_, tx| !tx.events.is_empty());
+        }
+
         // Step 7: Fetch transaction details if enabled
         if self.config.flags.contains(FetchingFlags::TRANSACTIONS) && !blocks.is_empty() {
             let mut transaction_requests = Vec::new();
@@ -359,12 +364,20 @@ impl<P: Provider + Send + Sync + std::fmt::Debug + 'static> Fetcher<P> {
                     .or_insert(HashSet::new())
                     .insert(*tx_hash);
 
-                transactions.entry(*tx_hash).and_modify(|tx| {
-                    tx.events.extend(events);
-                });
+                transactions
+                    .entry(*tx_hash)
+                    .or_insert_with(|| FetchTransaction {
+                        transaction: Some(t.transaction.clone()),
+                        events: vec![],
+                    })
+                    .events
+                    .extend(events);
                 cursor.last_pending_block_tx = Some(*tx_hash);
             }
         }
+
+        // Filter out transactions that don't have any events (not relevant to indexed contracts)
+        transactions.retain(|_, tx| !tx.events.is_empty());
 
         Ok(Some(FetchPendingResult {
             timestamp,
