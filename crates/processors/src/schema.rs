@@ -92,8 +92,8 @@ fn parse_schema(ty: &abigen::world::Ty) -> Result<Ty, ParseError> {
 
 pub fn parse_struct_to_schema_with_namespace(
     schema: &abigen::world::Struct,
-    name: &String,
     namespace: &String,
+    name: &String,
 ) -> Result<Ty, ParseError> {
     let name = format!("{}-{}", namespace, name);
     let children = schema
