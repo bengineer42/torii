@@ -40,14 +40,14 @@ cainome-cairo-serde = { git = "https://github.com/cartridge-gg/cainome", rev = "
 cainome-cairo-serde-derive = { git = "https://github.com/cartridge-gg/cainome", rev = "7d60de1" }
 
 # dojo
-dojo-utils = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-dojo-types = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-dojo-world = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-dojo-test-utils = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-dojo-metrics = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-scarb-metadata-ext = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-scarb-interop = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
-sozo-ops = { git = "https://github.com/dojoengine/dojo", rev = "451951f" }
+dojo-utils = { path = "../dojo/crates/dojo/utils" }
+dojo-types = { path = "../dojo/crates/dojo/types" }
+dojo-world = { path = "../dojo/crates/dojo/world" }
+dojo-test-utils = { path = "../dojo/crates/dojo/test-utils" }
+dojo-metrics = { path = "../dojo/crates/metrics" }
+scarb-metadata-ext = { path = "../dojo/crates/sozo/scarb_metadata_ext" }
+scarb-interop = { path = "../dojo/crates/sozo/scarb_interop" }
+sozo-ops = { path = "../dojo/crates/sozo/ops" }
 
 # katana
 katana-runner = { git = "https://github.com/dojoengine/katana", rev = "266fb96" }
