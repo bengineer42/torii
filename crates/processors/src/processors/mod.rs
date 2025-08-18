@@ -16,12 +16,14 @@ use metadata_update::MetadataUpdateProcessor;
 use raw_event::RawEventProcessor;
 use register_event::RegisterEventProcessor;
 use register_model::RegisterModelProcessor;
+use register_model_with_schema::RegisterModelWithSchemaProcessor;
 use starknet::core::types::Felt;
 use starknet::{core::utils::get_selector_from_name, providers::Provider};
 use store_del_record::StoreDelRecordProcessor;
 use store_set_record::StoreSetRecordProcessor;
 use store_transaction::StoreTransactionProcessor;
 use store_update_member::StoreUpdateMemberProcessor;
+use store_update_members::StoreUpdateMembersProcessor;
 use store_update_record::StoreUpdateRecordProcessor;
 use torii_proto::ContractType;
 use upgrade_event::UpgradeEventProcessor;
@@ -47,10 +49,12 @@ mod metadata_update;
 mod raw_event;
 mod register_event;
 mod register_model;
+mod register_model_with_schema;
 mod store_del_record;
 mod store_set_record;
 mod store_transaction;
 mod store_update_member;
+mod store_update_members;
 mod store_update_record;
 mod upgrade_event;
 mod upgrade_model;
@@ -88,12 +92,14 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Processors<P
                 ContractType::WORLD,
                 vec![
                     Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(StoreSetRecordProcessor),
                     Box::new(StoreDelRecordProcessor),
                     Box::new(StoreUpdateRecordProcessor),
+                    Box::new(StoreUpdateMembersProcessor),
                     Box::new(StoreUpdateMemberProcessor),
                     Box::new(MetadataUpdateProcessor),
                     Box::new(EventMessageProcessor),
@@ -127,6 +133,83 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Processors<P
                     Box::new(Erc4906MetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc4906BatchMetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc7572ContractUriUpdatedProcessor) as Box<dyn EventProcessor<P>>,
+                ],
+            ),
+            (
+                ContractType::ERC20World,
+                vec![
+                    Box::new(Erc20TransferProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc20LegacyTransferProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(StoreSetRecordProcessor),
+                    Box::new(StoreDelRecordProcessor),
+                    Box::new(StoreUpdateRecordProcessor),
+                    Box::new(StoreUpdateMembersProcessor),
+                    Box::new(StoreUpdateMemberProcessor),
+                    Box::new(MetadataUpdateProcessor),
+                    Box::new(EventMessageProcessor),
+                ],
+            ),
+            (
+                ContractType::ERC721World,
+                vec![
+                    Box::new(Erc721TransferProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc721LegacyTransferProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc4906MetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc4906BatchMetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(StoreSetRecordProcessor),
+                    Box::new(StoreDelRecordProcessor),
+                    Box::new(StoreUpdateRecordProcessor),
+                    Box::new(StoreUpdateMembersProcessor),
+                    Box::new(StoreUpdateMemberProcessor),
+                    Box::new(MetadataUpdateProcessor),
+                    Box::new(EventMessageProcessor),
+                ],
+            ),
+            (
+                ContractType::ERC1155World,
+                vec![
+                    Box::new(Erc1155TransferBatchProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc1155TransferSingleProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc4906MetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(Erc4906BatchMetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(StoreSetRecordProcessor),
+                    Box::new(StoreDelRecordProcessor),
+                    Box::new(StoreUpdateRecordProcessor),
+                    Box::new(StoreUpdateMembersProcessor),
+                    Box::new(StoreUpdateMemberProcessor),
+                    Box::new(MetadataUpdateProcessor),
+                    Box::new(EventMessageProcessor),
+                ],
+            ),
+            (
+                ContractType::Contract,
+                vec![
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(StoreSetRecordProcessor),
+                    Box::new(StoreDelRecordProcessor),
+                    Box::new(StoreUpdateRecordProcessor),
+                    Box::new(StoreUpdateMembersProcessor),
+                    Box::new(StoreUpdateMemberProcessor),
+                    Box::new(MetadataUpdateProcessor),
                 ],
             ),
             (
