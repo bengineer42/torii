@@ -6892,8 +6892,8 @@ dependencies = [
 
 [[package]]
 name = "merge-options"
-version = "1.6.0-alpha.2"
-source = "git+https://github.com/bengineer42/dojo?branch=add-write-schema-1.5#2eb84d12ef48b044b9dd40f434ca418a5ad78337"
+version = "1.6.0-alpha.1"
+source = "git+https://github.com/bengineer42/dojo?branch=old-dojo-models#21591e0651bcabfdb10aa14f553271548b9f2f0b"
 dependencies = [
  "proc-macro2",
  "quote",
