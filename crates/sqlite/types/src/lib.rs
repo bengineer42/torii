@@ -61,6 +61,9 @@ impl<const EVENT_MESSAGE: bool> From<Entity> for torii_proto::schema::Entity<EVE
         Self {
             hashed_keys: Felt::from_str(&value.id).unwrap(),
             models,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            executed_at: value.executed_at,
         }
     }
 }
@@ -80,9 +83,6 @@ impl<const EVENT_MESSAGE: bool> From<Entity> for EntityWithMetadata<EVENT_MESSAG
             .collect();
         Self {
             event_id: value.event_id.clone(),
-            created_at: value.created_at,
-            updated_at: value.updated_at,
-            executed_at: value.executed_at,
             entity: value.into(),
             keys,
         }
@@ -174,6 +174,7 @@ pub struct Token {
     pub symbol: String,
     pub decimals: u8,
     pub metadata: String,
+    pub total_supply: Option<String>,
 }
 
 impl From<Token> for torii_proto::Token {
@@ -189,6 +190,9 @@ impl From<Token> for torii_proto::Token {
             symbol: value.symbol,
             decimals: value.decimals,
             metadata: value.metadata,
+            total_supply: value
+                .total_supply
+                .map(|s| U256::from_be_hex(s.trim_start_matches("0x"))),
         }
     }
 }

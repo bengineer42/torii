@@ -150,10 +150,14 @@ async fn test_entities_queries(sequencer: &RunnerCtx) {
 
     db.execute().await.unwrap();
 
-    let messaging = Arc::new(Messaging::new(MessagingConfig::default()));
-    let grpc = DojoWorld::new(
-        Arc::new(db),
+    let storage = Arc::new(db);
+    let messaging = Arc::new(Messaging::new(
+        MessagingConfig::default(),
+        storage.clone(),
         provider.clone(),
+    ));
+    let grpc = DojoWorld::new(
+        storage,
         messaging.clone(),
         world_address,
         None,
@@ -223,19 +227,19 @@ async fn test_entity_broker_multiple_subscriptions() {
         let keys = vec![hashed_keys];
 
         // Create a test entity
+        let now = Utc::now();
         let entity = Entity {
             hashed_keys,
             models: vec![],
+            created_at: now,
+            updated_at: now,
+            executed_at: now,
         };
 
-        let now = Utc::now();
         let entity_with_metadata = EntityWithMetadata {
             entity,
             event_id: format!("event_{}", update_id),
             keys,
-            created_at: now,
-            updated_at: now,
-            executed_at: now,
         };
 
         // Publish the update to the broker
@@ -490,19 +494,19 @@ async fn test_entity_broker_stress_test() {
             };
 
             // Create entity with realistic models
+            let now = Utc::now();
             let entity = Entity {
                 hashed_keys,
                 models,
+                created_at: now,
+                updated_at: now,
+                executed_at: now,
             };
 
-            let now = Utc::now();
             let entity_with_metadata = EntityWithMetadata {
                 entity,
                 event_id: format!("stress_event_{}", update_id),
                 keys,
-                created_at: now,
-                updated_at: now,
-                executed_at: now,
             };
 
             // Publish the update to the broker

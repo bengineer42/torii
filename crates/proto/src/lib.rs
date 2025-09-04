@@ -55,6 +55,7 @@ pub enum ContractType {
     ERC1155World,
     Contract,
     UDC,
+    OTHER,
 }
 
 impl FromStr for ContractType {
@@ -71,6 +72,7 @@ impl FromStr for ContractType {
             "erc1155-world" => Ok(ContractType::ERC1155World),
             "contract" => Ok(ContractType::Contract),
             "udc" => Ok(ContractType::UDC),
+            "other" => Ok(ContractType::OTHER),
             _ => Err(ProtoError::InvalidContractType(input.to_string())),
         }
     }
@@ -88,6 +90,7 @@ impl std::fmt::Display for ContractType {
             ContractType::ERC1155World => write!(f, "ERC1155World"),
             ContractType::Contract => write!(f, "Contract"),
             ContractType::UDC => write!(f, "UDC"),
+            ContractType::OTHER => write!(f, "OTHER"),
         }
     }
 }
@@ -202,6 +205,7 @@ pub struct Token {
     pub symbol: String,
     pub decimals: u8,
     pub metadata: String,
+    pub total_supply: Option<U256>,
 }
 
 impl From<Token> for proto::types::Token {
@@ -213,6 +217,7 @@ impl From<Token> for proto::types::Token {
             symbol: value.symbol,
             decimals: value.decimals as u32,
             metadata: value.metadata.into_bytes(),
+            total_supply: value.total_supply.map(|s| s.to_be_bytes().to_vec()),
         }
     }
 }
@@ -227,6 +232,7 @@ impl TryFrom<proto::types::Token> for Token {
             symbol: value.symbol,
             decimals: value.decimals as u8,
             metadata: String::from_utf8(value.metadata).map_err(ProtoError::FromUtf8)?,
+            total_supply: value.total_supply.map(|s| U256::from_be_slice(&s)),
         })
     }
 }
@@ -240,6 +246,7 @@ impl TryFrom<proto::types::TokenCollection> for Token {
             symbol: value.symbol,
             decimals: value.decimals as u8,
             metadata: String::from_utf8(value.metadata).map_err(ProtoError::FromUtf8)?,
+            total_supply: None,
         })
     }
 }
@@ -595,6 +602,13 @@ pub enum ComparisonOperator {
     Lte,
     In,
     NotIn,
+    // Array-specific operators
+    Contains,      // Array contains value
+    ContainsAll,   // Array contains all values
+    ContainsAny,   // Array contains any of the values
+    ArrayLengthEq, // Array length equals
+    ArrayLengthGt, // Array length greater than
+    ArrayLengthLt, // Array length less than
 }
 
 impl fmt::Display for ComparisonOperator {
@@ -608,6 +622,14 @@ impl fmt::Display for ComparisonOperator {
             ComparisonOperator::Eq => write!(f, "="),
             ComparisonOperator::In => write!(f, "IN"),
             ComparisonOperator::NotIn => write!(f, "NOT IN"),
+            // Array operators don't use simple SQL operators,
+            // they require special JSON function handling
+            ComparisonOperator::Contains => write!(f, "CONTAINS"),
+            ComparisonOperator::ContainsAll => write!(f, "CONTAINS_ALL"),
+            ComparisonOperator::ContainsAny => write!(f, "CONTAINS_ANY"),
+            ComparisonOperator::ArrayLengthEq => write!(f, "ARRAY_LENGTH_EQ"),
+            ComparisonOperator::ArrayLengthGt => write!(f, "ARRAY_LENGTH_GT"),
+            ComparisonOperator::ArrayLengthLt => write!(f, "ARRAY_LENGTH_LT"),
         }
     }
 }
@@ -623,6 +645,12 @@ impl From<ComparisonOperator> for proto::types::ComparisonOperator {
             ComparisonOperator::Lte => proto::types::ComparisonOperator::Lte,
             ComparisonOperator::In => proto::types::ComparisonOperator::In,
             ComparisonOperator::NotIn => proto::types::ComparisonOperator::NotIn,
+            ComparisonOperator::Contains => proto::types::ComparisonOperator::Contains,
+            ComparisonOperator::ContainsAll => proto::types::ComparisonOperator::ContainsAll,
+            ComparisonOperator::ContainsAny => proto::types::ComparisonOperator::ContainsAny,
+            ComparisonOperator::ArrayLengthEq => proto::types::ComparisonOperator::ArrayLengthEq,
+            ComparisonOperator::ArrayLengthGt => proto::types::ComparisonOperator::ArrayLengthGt,
+            ComparisonOperator::ArrayLengthLt => proto::types::ComparisonOperator::ArrayLengthLt,
         }
     }
 }
@@ -638,6 +666,12 @@ impl From<proto::types::ComparisonOperator> for ComparisonOperator {
             proto::types::ComparisonOperator::Neq => ComparisonOperator::Neq,
             proto::types::ComparisonOperator::In => ComparisonOperator::In,
             proto::types::ComparisonOperator::NotIn => ComparisonOperator::NotIn,
+            proto::types::ComparisonOperator::Contains => ComparisonOperator::Contains,
+            proto::types::ComparisonOperator::ContainsAll => ComparisonOperator::ContainsAll,
+            proto::types::ComparisonOperator::ContainsAny => ComparisonOperator::ContainsAny,
+            proto::types::ComparisonOperator::ArrayLengthEq => ComparisonOperator::ArrayLengthEq,
+            proto::types::ComparisonOperator::ArrayLengthGt => ComparisonOperator::ArrayLengthGt,
+            proto::types::ComparisonOperator::ArrayLengthLt => ComparisonOperator::ArrayLengthLt,
         }
     }
 }

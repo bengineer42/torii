@@ -2004,7 +2004,11 @@ version = "1.6.0-alpha.1"
 source = "git+https://github.com/bengineer42/dojo?branch=old-dojo-models#21591e0651bcabfdb10aa14f553271548b9f2f0b"
 =======
 version = "1.7.0-alpha.1"
+<<<<<<< HEAD
 source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+>>>>>>> main
+=======
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 >>>>>>> main
 dependencies = [
  "bytes",
@@ -2030,7 +2034,11 @@ version = "1.6.0-alpha.1"
 source = "git+https://github.com/bengineer42/dojo?branch=old-dojo-models#21591e0651bcabfdb10aa14f553271548b9f2f0b"
 =======
 version = "1.7.0-alpha.1"
+<<<<<<< HEAD
 source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+>>>>>>> main
+=======
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 >>>>>>> main
 dependencies = [
  "assert_fs",
@@ -2044,7 +2052,7 @@ dependencies = [
 [[package]]
 name = "dojo-types"
 version = "1.7.0-alpha.1"
-source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 dependencies = [
  "anyhow",
  "cainome",
@@ -2097,7 +2105,11 @@ version = "1.6.0-alpha.1"
 source = "git+https://github.com/bengineer42/dojo?branch=old-dojo-models#21591e0651bcabfdb10aa14f553271548b9f2f0b"
 =======
 version = "1.7.0-alpha.1"
+<<<<<<< HEAD
 source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+>>>>>>> main
+=======
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 >>>>>>> main
 dependencies = [
  "anyhow",
@@ -2119,7 +2131,11 @@ version = "1.6.0-alpha.1"
 source = "git+https://github.com/bengineer42/dojo?branch=old-dojo-models#21591e0651bcabfdb10aa14f553271548b9f2f0b"
 =======
 version = "1.7.0-alpha.1"
+<<<<<<< HEAD
 source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+>>>>>>> main
+=======
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 >>>>>>> main
 dependencies = [
  "anyhow",
@@ -7166,7 +7182,7 @@ dependencies = [
 [[package]]
 name = "scarb-interop"
 version = "1.7.0-alpha.1"
-source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 dependencies = [
  "anyhow",
  "camino",
@@ -7193,7 +7209,7 @@ dependencies = [
 [[package]]
 name = "scarb-metadata-ext"
 version = "1.7.0-alpha.1"
-source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 dependencies = [
  "anyhow",
  "camino",
@@ -7705,7 +7721,11 @@ version = "1.6.0-alpha.1"
 source = "git+https://github.com/bengineer42/dojo?branch=old-dojo-models#21591e0651bcabfdb10aa14f553271548b9f2f0b"
 =======
 version = "1.7.0-alpha.1"
+<<<<<<< HEAD
 source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#ddce772c4a5abf57b85847e6855bd02640186168"
+>>>>>>> main
+=======
+source = "git+https://github.com/dojoengine/dojo?branch=primitive-from-sql#154fa874c56e7610601e9176993df3ca917d8eec"
 >>>>>>> main
 dependencies = [
  "anyhow",
@@ -8967,7 +8987,7 @@ dependencies = [
 
 [[package]]
 name = "torii"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -8983,7 +9003,7 @@ dependencies = [
 
 [[package]]
 name = "torii-adigraphmap"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "futures-util",
  "petgraph",
@@ -8994,7 +9014,7 @@ dependencies = [
 
 [[package]]
 name = "torii-broker"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "dashmap 6.1.0",
  "futures-channel",
@@ -9008,7 +9028,7 @@ dependencies = [
 
 [[package]]
 name = "torii-cache"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "async-trait",
  "dashmap 6.1.0",
@@ -9027,7 +9047,7 @@ dependencies = [
 
 [[package]]
 name = "torii-cli"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -9050,7 +9070,7 @@ dependencies = [
 
 [[package]]
 name = "torii-client"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "async-trait",
  "crypto-bigint",
@@ -9073,7 +9093,7 @@ dependencies = [
 
 [[package]]
 name = "torii-controllers"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "chrono",
  "mockito",
@@ -9094,7 +9114,7 @@ dependencies = [
 
 [[package]]
 name = "torii-graphql"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-graphql",
@@ -9109,6 +9129,7 @@ dependencies = [
  "dojo-utils",
  "dojo-world",
  "handlebars 6.3.2",
+ "indexmap 2.7.1",
  "katana-runner",
  "regex",
  "scarb-interop",
@@ -9118,6 +9139,7 @@ dependencies = [
  "serial_test",
  "sqlx",
  "starknet",
+ "starknet-core 0.12.3",
  "starknet-crypto",
  "strum 0.25.0",
  "strum_macros 0.25.3",
@@ -9130,9 +9152,11 @@ dependencies = [
  "torii-cache",
  "torii-indexer",
  "torii-indexer-fetcher",
+ "torii-messaging",
  "torii-processors",
  "torii-sqlite",
  "torii-storage",
+ "torii-typed-data",
  "tracing",
  "url",
  "warp",
@@ -9140,7 +9164,7 @@ dependencies = [
 
 [[package]]
 name = "torii-grpc-client"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "crypto-bigint",
  "dojo-types",
@@ -9165,7 +9189,7 @@ dependencies = [
 
 [[package]]
 name = "torii-grpc-server"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "base64 0.21.7",
@@ -9225,7 +9249,7 @@ dependencies = [
 
 [[package]]
 name = "torii-indexer"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -9274,7 +9298,7 @@ dependencies = [
 
 [[package]]
 name = "torii-indexer-fetcher"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-recursion",
@@ -9320,7 +9344,7 @@ dependencies = [
 
 [[package]]
 name = "torii-libp2p-relay"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9343,21 +9367,20 @@ dependencies = [
  "tokio",
  "torii-messaging",
  "torii-proto",
- "torii-storage",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "torii-math"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "starknet",
 ]
 
 [[package]]
 name = "torii-mcp"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -9368,9 +9391,10 @@ dependencies = [
 
 [[package]]
 name = "torii-messaging"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
+ "async-trait",
  "crypto-bigint",
  "dojo-types",
  "dojo-world",
@@ -9389,7 +9413,7 @@ dependencies = [
 
 [[package]]
 name = "torii-processors"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9423,7 +9447,7 @@ dependencies = [
 
 [[package]]
 name = "torii-proto"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "chrono",
  "crypto-bigint",
@@ -9445,7 +9469,7 @@ dependencies = [
 
 [[package]]
 name = "torii-runner"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -9504,7 +9528,7 @@ dependencies = [
 
 [[package]]
 name = "torii-server"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9545,7 +9569,7 @@ dependencies = [
 
 [[package]]
 name = "torii-sqlite"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9593,7 +9617,7 @@ dependencies = [
 
 [[package]]
 name = "torii-sqlite-types"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "chrono",
@@ -9609,7 +9633,7 @@ dependencies = [
 
 [[package]]
 name = "torii-storage"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -9624,7 +9648,7 @@ dependencies = [
 
 [[package]]
 name = "torii-task-network"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -9636,7 +9660,7 @@ dependencies = [
 
 [[package]]
 name = "torii-typed-data"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "cainome",
  "crypto-bigint",
@@ -11191,7 +11215,7 @@ dependencies = [
 
 [[package]]
 name = "xtask-generate-test-db"
-version = "1.7.0-alpha.2"
+version = "1.7.0-alpha.4"
 dependencies = [
  "anyhow",
  "dojo-test-utils",
