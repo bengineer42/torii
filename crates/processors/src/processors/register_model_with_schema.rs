@@ -123,6 +123,7 @@ where
                 ctx.block_timestamp,
                 None,
                 None,
+                false,
             )
             .await?;
 
@@ -139,6 +140,7 @@ where
                     unpacked_size,
                     layout,
                     schema,
+                    use_legacy_store: false,
                 },
             )
             .await;

@@ -117,7 +117,7 @@ where
                     member_selector
                 )))?
                 .clone();
-            member.ty.deserialize(&mut values)?;
+            member.ty.deserialize(&mut values, model.use_legacy_store)?;
             members.push(member);
         }
 

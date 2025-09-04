@@ -87,6 +87,13 @@ fn parse_schema(ty: &abigen::world::Ty) -> Result<Ty, ParseError> {
             Ok(Ty::Array(values))
         }
         abigen::world::Ty::ByteArray => Ok(Ty::ByteArray("".to_string())),
+        abigen::world::Ty::FixedArray((values, length)) => {
+            let values = values
+                .iter()
+                .map(parse_schema)
+                .collect::<Result<Vec<_>, ParseError>>()?;
+            Ok(Ty::FixedSizeArray((values, *length)))
+        }
     }
 }
 
