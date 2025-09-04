@@ -27,7 +27,7 @@ use crate::constants::LOG_TARGET;
 use crate::error::{Error, ProcessError};
 use crate::IndexingFlags;
 use torii_indexer_fetcher::{
-    FetchPendingResult, FetchRangeResult, FetchResult, Fetcher, FetcherConfig,
+    FetchPreconfirmedBlockResult, FetchRangeResult, FetchResult, Fetcher, FetcherConfig,
 };
 use torii_processors::task_manager::{ParallelizedEvent, TaskManager};
 
@@ -193,15 +193,19 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                         Ok((fetch_result, controller_sync_handle)) => {
                             match fetch_result {
                                 Ok(fetch_result) => {
-                                    if fetching_erroring_out && self.cached_fetch.is_none() {
+                                    let is_from_cache = self.cached_fetch.is_some();
+
+                                    if fetching_erroring_out && !is_from_cache {
                                         fetching_erroring_out = false;
                                         fetching_backoff_delay = Duration::from_secs(1);
                                         gauge!("torii_indexer_backoff_delay_seconds", "operation" => "fetch").set(0.0);
                                         info!(target: LOG_TARGET, "Fetching reestablished.");
                                     }
 
-                                    // Cache the fetch result for retry
-                                    self.cached_fetch = Some(fetch_result.clone());
+                                    // Cache the fetch result for retry only if it's newly fetched
+                                    if !is_from_cache {
+                                        self.cached_fetch = Some(fetch_result.clone());
+                                    }
 
                                     let process_start = Instant::now();
                                     match self.process(&fetch_result).await {
@@ -216,7 +220,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                                                 gauge!("torii_indexer_backoff_delay_seconds", "operation" => "process").set(0.0);
                                                 info!(target: LOG_TARGET, "Processing reestablished.");
                                             }
-                                            // Reset the cached data
+                                            // Clear the cache after successful processing
                                             self.cached_fetch = None;
 
                                             // Wait for controller sync to complete before executing
@@ -278,13 +282,13 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
     pub async fn process(&mut self, fetch_result: &FetchResult) -> Result<(), ProcessError> {
         let FetchResult {
             range,
-            pending,
+            preconfirmed_block,
             cursors,
         } = fetch_result;
 
         self.process_range(range).await?;
-        if let Some(pending) = pending {
-            self.process_pending(pending).await?;
+        if let Some(preconfirmed_block) = preconfirmed_block {
+            self.process_pending(preconfirmed_block).await?;
         }
 
         // Process parallelized events
@@ -349,7 +353,10 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         Ok(())
     }
 
-    pub async fn process_pending(&mut self, data: &FetchPendingResult) -> Result<(), ProcessError> {
+    pub async fn process_pending(
+        &mut self,
+        data: &FetchPreconfirmedBlockResult,
+    ) -> Result<(), ProcessError> {
         for (tx_hash, tx) in &data.transactions {
             if tx.events.is_empty() {
                 continue;

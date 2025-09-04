@@ -104,7 +104,6 @@ where
             _ => unreachable!(),
         }
         let layout = model.layout().await?;
-
         // Events are never stored onchain, hence no packing or unpacking.
         let unpacked_size: u32 = 0;
         let packed_size: u32 = 0;
@@ -128,6 +127,7 @@ where
             "Registered event content."
         );
 
+        // Event models, still use Serde for serialization. So we need to use the legacy store.
         ctx.storage
             .register_model(
                 selector,
@@ -140,6 +140,7 @@ where
                 ctx.block_timestamp,
                 None,
                 None,
+                true,
             )
             .await?;
 
@@ -156,6 +157,8 @@ where
                     unpacked_size,
                     layout,
                     schema,
+                    // Event models, still use Serde for serialization. So we need to use the legacy store.
+                    use_legacy_store: true,
                 },
             )
             .await;

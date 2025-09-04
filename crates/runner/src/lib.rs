@@ -154,11 +154,13 @@ impl Runner {
         );
         let provider: Arc<_> = JsonRpcClient::new(transport).into();
 
-        // Check provider spec version. We only support v0.8.
+        // Check provider spec version. We only support v0.9.
+        let supported_spec = "0.9";
         let spec_version = provider.spec_version().await?;
-        if !spec_version.starts_with("0.8") {
+        if !spec_version.starts_with(supported_spec) {
             return Err(anyhow::anyhow!(
-                "Provider spec version is not supported. Please use a provider that supports v0.8. Got: {spec_version}. You might need to add a `rpc/v0_8` to the end of the URL."
+                "Provider spec version is not supported. Please use a provider that supports v{supported_spec}. Got: {spec_version}. You might need to add a `rpc/v{}` to the end of the URL.",
+                supported_spec.replace('.', "_")
             ));
         }
 
@@ -246,13 +248,17 @@ impl Runner {
         let write_pool = SqlitePoolOptions::new()
             .min_connections(1)
             .max_connections(1)
+            .acquire_timeout(Duration::from_millis(self.args.sql.acquire_timeout))
+            .idle_timeout(Some(Duration::from_millis(self.args.sql.idle_timeout)))
             .connect_with(options.clone())
             .await?;
 
         let readonly_options = options.read_only(true);
         let readonly_pool = SqlitePoolOptions::new()
             .min_connections(1)
-            .max_connections(100)
+            .max_connections(self.args.sql.max_connections)
+            .acquire_timeout(Duration::from_millis(self.args.sql.acquire_timeout))
+            .idle_timeout(Some(Duration::from_millis(self.args.sql.idle_timeout)))
             .connect_with(readonly_options)
             .await?;
 
@@ -605,7 +611,7 @@ async fn verify_contracts_deployed(
         let contract = *contract;
         async move {
             let result = provider
-                .get_class_at(BlockId::Tag(BlockTag::Pending), contract.address)
+                .get_class_at(BlockId::Tag(BlockTag::PreConfirmed), contract.address)
                 .await;
             (contract, result)
         }

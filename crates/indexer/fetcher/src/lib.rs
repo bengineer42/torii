@@ -2,13 +2,13 @@
 mod test;
 
 pub mod error;
+use indexmap::IndexMap;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub use error::Error;
 
 pub mod json_rpc;
 use bitflags::bitflags;
-use hashlink::LinkedHashMap;
 pub use json_rpc::Fetcher;
 use starknet::core::types::{Event, TransactionContent};
 use starknet_crypto::Felt;
@@ -50,7 +50,7 @@ pub struct FetchRangeBlock {
     // to see if we need to re fetch the pending block.
     pub block_hash: Option<Felt>,
     pub timestamp: u64,
-    pub transactions: LinkedHashMap<Felt, FetchTransaction>,
+    pub transactions: IndexMap<Felt, FetchTransaction>,
 }
 
 #[derive(Debug, Clone)]
@@ -68,10 +68,10 @@ pub struct FetchRangeResult {
 }
 
 #[derive(Debug, Clone)]
-pub struct FetchPendingResult {
+pub struct FetchPreconfirmedBlockResult {
     pub block_number: u64,
     pub timestamp: u64,
-    pub transactions: LinkedHashMap<Felt, FetchTransaction>,
+    pub transactions: IndexMap<Felt, FetchTransaction>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +85,6 @@ pub struct Cursors {
 #[derive(Debug, Clone)]
 pub struct FetchResult {
     pub range: FetchRangeResult,
-    pub pending: Option<FetchPendingResult>,
+    pub preconfirmed_block: Option<FetchPreconfirmedBlockResult>,
     pub cursors: Cursors,
 }
