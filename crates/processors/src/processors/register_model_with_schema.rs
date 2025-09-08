@@ -19,7 +19,7 @@ pub(crate) const LOG_TARGET: &str = "torii::indexer::processors::register_model_
 
 #[derive(Default, Debug)]
 pub struct RegisterModelWithSchemaProcessor;
-
+const USE_LEGACY_STORE: bool = true;
 #[async_trait]
 impl<P> EventProcessor<P> for RegisterModelWithSchemaProcessor
 where
@@ -123,7 +123,7 @@ where
                 ctx.block_timestamp,
                 None,
                 None,
-                false,
+                USE_LEGACY_STORE,
             )
             .await?;
 
@@ -140,7 +140,7 @@ where
                     unpacked_size,
                     layout,
                     schema,
-                    use_legacy_store: false,
+                    use_legacy_store: USE_LEGACY_STORE,
                 },
             )
             .await;
