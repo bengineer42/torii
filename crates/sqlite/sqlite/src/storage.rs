@@ -776,7 +776,7 @@ impl ReadOnlyStorage for Sql {
         let mut schema = self.model(model_selector).await?.schema;
         let query = format!("SELECT * FROM [{}] WHERE internal_id = ?", schema.name());
         let mut query = sqlx::query(&query);
-        query = query.bind(format!("{:#x}", entity_id));
+        query = query.bind(format!("{:#066x}", entity_id));
         let row: Option<SqliteRow> = query.fetch_optional(&self.pool).await?;
         match row {
             Some(row) => {
@@ -909,7 +909,7 @@ impl Storage for Sql {
     ) -> Result<(), StorageError> {
         let namespaced_name = entity.name();
 
-        let entity_id = format!("{:#x}", entity_id);
+        let entity_id = format!("{:#066x}", entity_id);
         let model_id = format!("{:#x}", model_selector);
 
         let keys_str = keys.map(|keys| felts_to_sql_string(&keys));
@@ -1009,7 +1009,7 @@ impl Storage for Sql {
         let namespaced_name = entity.name();
         let (model_namespace, model_name) = namespaced_name.split_once('-').unwrap();
 
-        let entity_id = format!("{:#x}", poseidon_hash_many(&keys));
+        let entity_id = format!("{:#066x}", poseidon_hash_many(&keys));
         let model_selector = compute_selector_from_names(model_namespace, model_name);
         let model_id = format!("{:#x}", model_selector);
 
@@ -1078,7 +1078,7 @@ impl Storage for Sql {
         event_id: &str,
         block_timestamp: u64,
     ) -> Result<(), StorageError> {
-        let entity_id = format!("{:#x}", entity_id);
+        let entity_id = format!("{:#066x}", entity_id);
         let model_id = format!("{:#x}", model_id);
         let model_table = entity.name();
 

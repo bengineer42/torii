@@ -108,6 +108,8 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Processors<P
             (
                 ContractType::ERC20,
                 vec![
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc20TransferProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc20LegacyTransferProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc7572ContractUriUpdatedProcessor) as Box<dyn EventProcessor<P>>,
@@ -122,6 +124,8 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Processors<P
             (
                 ContractType::ERC721,
                 vec![
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc721TransferProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc721LegacyTransferProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc4906MetadataUpdateProcessor) as Box<dyn EventProcessor<P>>,
@@ -138,6 +142,8 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Processors<P
             (
                 ContractType::ERC1155,
                 vec![
+                    Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc1155TransferBatchProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc1155TransferSingleProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(Erc1155LegacyTransferBatchProcessor) as Box<dyn EventProcessor<P>>,

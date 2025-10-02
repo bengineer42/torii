@@ -1,17 +1,16 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
-
-use async_trait::async_trait;
-use dojo_types::schema::{Struct, Ty};
-use dojo_world::contracts::abigen::world::Event as WorldEvent;
-use starknet::core::types::Event;
-use starknet::core::utils::get_selector_from_name;
-use starknet::providers::Provider;
-use tracing::{debug, info};
-
 use crate::error::Error;
 use crate::task_manager::TaskId;
 use crate::{EventProcessor, EventProcessorConfig, EventProcessorContext};
 use crate::{IndexingMode, Result};
+use async_trait::async_trait;
+use dojo_types::schema::{Struct, Ty};
+use dojo_world::contracts::abigen::world::Event as WorldEvent;
+use metrics::counter;
+use starknet::core::types::Event;
+use starknet::core::utils::get_selector_from_name;
+use starknet::providers::Provider;
+use std::hash::{DefaultHasher, Hash, Hasher};
+use tracing::{debug, info};
 
 pub(crate) const LOG_TARGET: &str = "torii::indexer::processors::store_update_members";
 
@@ -144,6 +143,16 @@ where
                 None,
             )
             .await?;
+
+        // Record successful entity storage with context
+        counter!(
+            "torii_processor_operations_total",
+            "operation" => "members_updated",
+            "namespace" => model.namespace.clone(),
+            "model_name" => model.name.clone(),
+        )
+        .increment(1);
+
         Ok(())
     }
 }

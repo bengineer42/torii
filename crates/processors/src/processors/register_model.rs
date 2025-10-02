@@ -102,7 +102,7 @@ where
         let mut schema = model.schema().await?;
         match &mut schema {
             Ty::Struct(struct_ty) => {
-                struct_ty.name = format!("{}-{}", namespace, struct_ty.name);
+                struct_ty.name = format!("{}-{}", namespace, name);
             }
             _ => unreachable!(),
         }

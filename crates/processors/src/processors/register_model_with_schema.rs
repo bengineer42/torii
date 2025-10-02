@@ -1,19 +1,18 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
-
+use crate::error::Error;
+use crate::schema::parse_struct_to_schema_with_namespace;
+use crate::task_manager::TaskId;
+use crate::{EventProcessor, EventProcessorContext};
 use async_trait::async_trait;
 use dojo_types::naming::compute_selector_from_names;
 use dojo_world::contracts::abigen::model::Layout;
 use dojo_world::contracts::abigen::world::Event as WorldEvent;
 use dojo_world::contracts::model::ModelError;
+use metrics::counter;
 use starknet::core::types::Event;
 use starknet::providers::Provider;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use torii_proto::Model;
 use tracing::{debug, info};
-
-use crate::error::Error;
-use crate::schema::parse_struct_to_schema_with_namespace;
-use crate::task_manager::TaskId;
-use crate::{EventProcessor, EventProcessorContext};
 
 pub(crate) const LOG_TARGET: &str = "torii::indexer::processors::register_model_with_schema";
 
@@ -132,7 +131,7 @@ where
                 selector,
                 Model {
                     selector,
-                    namespace,
+                    namespace: namespace.clone(),
                     name,
                     class_hash: class_hash.into(),
                     contract_address: contract_address.into(),
@@ -144,6 +143,15 @@ where
                 },
             )
             .await;
+
+        // Record successful model registration with context
+        counter!(
+            "torii_processor_operations_total",
+            "operation" => "model_with_schema_registered",
+            "namespace" => namespace,
+            "legacy_store" => USE_LEGACY_STORE.to_string()
+        )
+        .increment(1);
 
         Ok(())
     }
