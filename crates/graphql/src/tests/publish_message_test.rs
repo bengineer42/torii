@@ -19,7 +19,7 @@ mod tests {
     use torii_messaging::{Messaging, MessagingConfig};
     use torii_sqlite::executor::Executor;
     use torii_sqlite::Sql;
-    use torii_storage::proto::{Contract, ContractType};
+    use torii_storage::proto::{ContractDefinition, ContractType};
     use torii_storage::Storage;
     use torii_typed_data::typed_data::{Domain, Field, SimpleField, TypedData};
 
@@ -60,9 +60,10 @@ mod tests {
             Sql::new(
                 pool.clone(),
                 sender,
-                &[Contract {
+                &[ContractDefinition {
                     address: Felt::ZERO,
                     r#type: ContractType::WORLD,
+                    starting_block: None,
                 }],
             )
             .await

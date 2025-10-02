@@ -12,10 +12,11 @@ use starknet::core::types::U256;
 use starknet_crypto::{poseidon_hash_many, Felt};
 use torii_math::I256;
 use torii_proto::{
-    schema::Entity, CallType, Clause, CompositeClause, ContractCursor, Controller, ControllerQuery,
-    Event, EventQuery, LogicalOperator, Model, OrderBy, OrderDirection, Page, Query, Token,
-    TokenBalance, TokenBalanceQuery, TokenCollection, TokenQuery, Transaction, TransactionCall,
-    TransactionQuery,
+    schema::Entity, CallType, Clause, CompositeClause, Contract, ContractCursor, ContractQuery,
+    Controller, ControllerQuery, Event, EventQuery, LogicalOperator, Model, OrderBy,
+    OrderDirection, Page, Query, Token, TokenBalance, TokenBalanceQuery, TokenContract,
+    TokenContractQuery, TokenQuery, TokenTransfer, TokenTransferQuery, Transaction,
+    TransactionCall, TransactionQuery,
 };
 use torii_sqlite_types::{HookEvent, Model as SQLModel};
 use torii_storage::{ReadOnlyStorage, Storage, StorageError};
@@ -51,33 +52,6 @@ pub const LOG_TARGET: &str = "torii::sqlite::storage";
 impl ReadOnlyStorage for Sql {
     fn as_read_only(&self) -> &dyn ReadOnlyStorage {
         self
-    }
-
-    /// Returns the cursors for all contracts.
-    async fn cursors(&self) -> Result<HashMap<Felt, ContractCursor>, StorageError> {
-        let cursors =
-            sqlx::query_as::<_, torii_sqlite_types::ContractCursor>("SELECT * FROM contracts")
-                .fetch_all(&self.pool)
-                .await?;
-
-        let mut cursors_map = HashMap::new();
-        for c in cursors {
-            let contract_address = Felt::from_str(&c.contract_address)
-                .map_err(|e| Error::Parse(ParseError::FromStr(e)))?;
-            let last_pending_block_tx = c
-                .last_pending_block_tx
-                .map(|tx| Felt::from_str(&tx).map_err(|e| Error::Parse(ParseError::FromStr(e))))
-                .transpose()?;
-            let cursor = ContractCursor {
-                contract_address,
-                last_pending_block_tx,
-                head: c.head.map(|h| h as u64),
-                last_block_timestamp: c.last_block_timestamp.map(|t| t as u64),
-                tps: c.tps.map(|t| t as u64),
-            };
-            cursors_map.insert(contract_address, cursor);
-        }
-        Ok(cursors_map)
     }
 
     /// Returns the model metadata for the storage.
@@ -231,9 +205,53 @@ impl ReadOnlyStorage for Sql {
         })
     }
 
+    async fn contracts(&self, query: &ContractQuery) -> Result<Vec<Contract>, StorageError> {
+        let mut query_builder = "SELECT * FROM contracts".to_string();
+        let mut bind_values = vec![];
+        let mut conditions = vec![];
+
+        if !query.contract_addresses.is_empty() {
+            let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
+            conditions.push(format!("contract_address IN ({})", placeholders));
+            bind_values.extend(
+                query
+                    .contract_addresses
+                    .iter()
+                    .map(|addr| format!("{:#x}", addr)),
+            );
+        }
+
+        if !query.contract_types.is_empty() {
+            let placeholders = vec!["?"; query.contract_types.len()].join(", ");
+            conditions.push(format!("contract_type IN ({})", placeholders));
+            bind_values.extend(query.contract_types.iter().map(|t| t.to_string()));
+        }
+
+        if !conditions.is_empty() {
+            query_builder += &format!(" WHERE {}", conditions.join(" AND "));
+        }
+
+        query_builder += " ORDER BY created_at DESC";
+
+        let mut query = sqlx::query_as::<_, torii_sqlite_types::Contract>(&query_builder);
+        for value in bind_values {
+            query = query.bind(value);
+        }
+
+        let contracts = query.fetch_all(&self.pool).await?;
+        let items: Vec<Contract> = contracts
+            .into_iter()
+            .map(|contract| contract.into())
+            .collect();
+
+        Ok(items)
+    }
+
     async fn tokens(&self, query: &TokenQuery) -> Result<Page<Token>, StorageError> {
         let executor = PaginationExecutor::new(self.pool.clone());
-        let mut query_builder = QueryBuilder::new("tokens").select(&["*".to_string()]);
+        let mut query_builder = QueryBuilder::new("tokens")
+            .select(&["*".to_string()])
+            .where_clause("token_id != '' AND token_id IS NOT NULL");
 
         if !query.contract_addresses.is_empty() {
             let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
@@ -338,35 +356,26 @@ impl ReadOnlyStorage for Sql {
         })
     }
 
-    async fn token_collections(
+    async fn token_contracts(
         &self,
-        query: &TokenBalanceQuery,
-    ) -> Result<Page<TokenCollection>, StorageError> {
+        query: &TokenContractQuery,
+    ) -> Result<Page<TokenContract>, StorageError> {
         use crate::query::{PaginationExecutor, QueryBuilder};
 
         let executor = PaginationExecutor::new(self.pool.clone());
         let mut query_builder = QueryBuilder::new("tokens")
             .alias("t")
             .select(&[
-                "t.id as id".to_string(),
                 "t.contract_address as contract_address".to_string(),
+                "c.contract_type as contract_type".to_string(),
                 "t.name as name".to_string(),
                 "t.symbol as symbol".to_string(),
                 "t.decimals as decimals".to_string(),
                 "t.metadata as metadata".to_string(),
-                "count(t.token_id) as count".to_string(),
+                "t.total_supply as total_supply".to_string(),
             ])
-            .group_by("t.contract_address");
-
-        if !query.account_addresses.is_empty() {
-            query_builder = query_builder.join("JOIN token_balances tb ON tb.token_id = CONCAT(t.contract_address, ':', t.token_id)");
-            let placeholders = vec!["?"; query.account_addresses.len()].join(", ");
-            query_builder =
-                query_builder.where_clause(&format!("tb.account_address IN ({})", placeholders));
-            for addr in &query.account_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
-            }
-        }
+            .join("JOIN contracts c ON c.contract_address = t.contract_address")
+            .where_clause("t.token_id = '' OR t.token_id IS NULL");
 
         if !query.contract_addresses.is_empty() {
             let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
@@ -377,13 +386,12 @@ impl ReadOnlyStorage for Sql {
             }
         }
 
-        if !query.token_ids.is_empty() {
-            let placeholders = vec!["?"; query.token_ids.len()].join(", ");
+        if !query.contract_types.is_empty() {
+            let placeholders = vec!["?"; query.contract_types.len()].join(", ");
             query_builder =
-                query_builder.where_clause(&format!("t.token_id IN ({})", placeholders));
-            for token_id in &query.token_ids {
-                query_builder =
-                    query_builder.bind_value(u256_to_sql_string(&U256::from(*token_id)));
+                query_builder.where_clause(&format!("c.contract_type IN ({})", placeholders));
+            for contract_type in &query.contract_types {
+                query_builder = query_builder.bind_value(contract_type.to_string());
             }
         }
 
@@ -392,17 +400,17 @@ impl ReadOnlyStorage for Sql {
                 query_builder,
                 &query.pagination,
                 &OrderBy {
-                    field: "id".to_string(),
+                    field: "contract_address".to_string(),
                     direction: OrderDirection::Desc,
                 },
             )
             .await?;
-        let items: Vec<TokenCollection> = page
+        let items: Vec<TokenContract> = page
             .items
             .into_iter()
             .map(|row| {
-                Result::<TokenCollection, Error>::Ok(
-                    torii_sqlite_types::TokenCollection::from_row(&row)?.into(),
+                Result::<TokenContract, Error>::Ok(
+                    torii_sqlite_types::TokenContract::from_row(&row)?.into(),
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -598,6 +606,79 @@ impl ReadOnlyStorage for Sql {
                 Result::<Event, Error>::Ok(torii_sqlite_types::Event::from_row(&row)?.into())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        Ok(Page {
+            items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    async fn token_transfers(
+        &self,
+        query: &TokenTransferQuery,
+    ) -> Result<Page<TokenTransfer>, StorageError> {
+        use crate::query::{PaginationExecutor, QueryBuilder};
+
+        let executor = PaginationExecutor::new(self.pool.clone());
+        let mut query_builder = QueryBuilder::new("token_transfers").select(&["*".to_string()]);
+
+        if !query.account_addresses.is_empty() {
+            let placeholders_from = vec!["?"; query.account_addresses.len()].join(", ");
+            let placeholders_to = vec!["?"; query.account_addresses.len()].join(", ");
+            query_builder = query_builder.where_clause(&format!(
+                "((from_address IN ({})) OR (to_address IN ({})))",
+                placeholders_from, placeholders_to
+            ));
+            for addr in &query.account_addresses {
+                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+            }
+            for addr in &query.account_addresses {
+                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+            }
+        }
+
+        if !query.contract_addresses.is_empty() {
+            let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("contract_address IN ({})", placeholders));
+            for addr in &query.contract_addresses {
+                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+            }
+        }
+
+        if !query.token_ids.is_empty() {
+            let placeholders = vec!["?"; query.token_ids.len()].join(", ");
+            // Match numeric token id when present (after ':')
+            query_builder = query_builder.where_clause(&format!(
+                "SUBSTR(token_id, INSTR(token_id, ':') + 1) IN ({})",
+                placeholders
+            ));
+            for token_id in &query.token_ids {
+                query_builder =
+                    query_builder.bind_value(u256_to_sql_string(&U256::from(*token_id)));
+            }
+        }
+
+        let page = executor
+            .execute_paginated_query(
+                query_builder,
+                &query.pagination,
+                &OrderBy {
+                    field: "id".to_string(),
+                    direction: OrderDirection::Desc,
+                },
+            )
+            .await?;
+
+        let items: Vec<TokenTransfer> = page
+            .items
+            .into_iter()
+            .map(|row| {
+                Result::<TokenTransfer, Error>::Ok(
+                    torii_sqlite_types::TokenTransfer::from_row(&row)?.into(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         Ok(Page {
             items,
             next_cursor: page.next_cursor,
@@ -1292,26 +1373,29 @@ impl Storage for Sql {
         };
 
         let id = format!("{}:{}", event_id, token_id);
+        let token_id_str = token_id.to_string();
+        let event_id_str = event_id.to_string();
+        let executed_at_str = utc_dt_string_from_timestamp(block_timestamp);
 
         let insert_query = format!(
             "INSERT INTO {TOKEN_TRANSFER_TABLE} (id, contract_address, from_address, to_address, \
-             amount, token_id, event_id, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+             amount, token_id, event_id, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING *"
         );
 
         self.executor
             .send(QueryMessage::new(
                 insert_query.to_string(),
                 vec![
-                    Argument::String(id),
+                    Argument::String(id.clone()),
                     Argument::FieldElement(contract_address),
                     Argument::FieldElement(from),
                     Argument::FieldElement(to),
                     Argument::String(u256_to_sql_string(&amount)),
-                    Argument::String(token_id.to_string()),
-                    Argument::String(event_id.to_string()),
-                    Argument::String(utc_dt_string_from_timestamp(block_timestamp)),
+                    Argument::String(token_id_str.clone()),
+                    Argument::String(event_id_str.clone()),
+                    Argument::String(executed_at_str.clone()),
                 ],
-                QueryType::Other,
+                QueryType::StoreTokenTransfer,
             ))
             .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
 

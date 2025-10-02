@@ -141,7 +141,7 @@ mod test {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
 
-    use torii_proto::{Contract, ContractType};
+    use torii_proto::{ContractDefinition, ContractType};
     use torii_sqlite_types::ModelIndices;
 
     use super::*;
@@ -260,7 +260,7 @@ mod test {
             torii_args.indexing.events_chunk_size,
             DEFAULT_EVENTS_CHUNK_SIZE
         );
-        assert!(torii_args.indexing.pending);
+        assert!(torii_args.indexing.preconfirmed);
         assert_eq!(
             torii_args.indexing.polling_interval,
             DEFAULT_POLLING_INTERVAL
@@ -323,7 +323,7 @@ mod test {
         max_concurrent_tasks = 1000
         transactions = false
         contracts = [
-            "erc20:0x1234",
+            "erc20:0x1234:123",
             "erc721:0x5678"
         ]
         namespaces = []
@@ -360,20 +360,22 @@ mod test {
         );
         assert_eq!(torii_args.indexing.events_chunk_size, 9999);
         assert_eq!(torii_args.indexing.blocks_chunk_size, 10240);
-        assert!(torii_args.indexing.pending);
+        assert!(torii_args.indexing.preconfirmed);
         assert_eq!(torii_args.indexing.polling_interval, 500);
         assert_eq!(torii_args.indexing.max_concurrent_tasks, 1000);
         assert!(!torii_args.indexing.transactions);
         assert_eq!(
             torii_args.indexing.contracts,
             vec![
-                Contract {
+                ContractDefinition {
                     address: Felt::from_str("0x1234").unwrap(),
-                    r#type: ContractType::ERC20
+                    r#type: ContractType::ERC20,
+                    starting_block: Some(123),
                 },
-                Contract {
+                ContractDefinition {
                     address: Felt::from_str("0x5678").unwrap(),
-                    r#type: ContractType::ERC721
+                    r#type: ContractType::ERC721,
+                    starting_block: None,
                 }
             ]
         );

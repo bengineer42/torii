@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::fmt::Debug;
 use std::fs::File;
 use std::io::BufReader;
 use std::net::{IpAddr, SocketAddr};
@@ -6,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow;
+use camino::Utf8PathBuf;
 use http::header::CONTENT_TYPE;
 use http::{HeaderName, Method};
 use hyper::client::connect::dns::GaiResolver;
@@ -17,17 +19,20 @@ use hyper_reverse_proxy::ReverseProxy;
 use rustls::{Certificate, PrivateKey, ServerConfig};
 use serde_json::json;
 use sqlx::SqlitePool;
+use starknet::providers::Provider;
 use tokio::sync::RwLock;
 use tokio_rustls::TlsAcceptor;
+use torii_storage::Storage;
 use tower::ServiceBuilder;
 use tower_http::cors::{AllowOrigin, CorsLayer};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 use crate::handlers::graphql::GraphQLHandler;
 use crate::handlers::grpc::GrpcHandler;
 use crate::handlers::mcp::McpHandler;
+use crate::handlers::metadata::MetadataHandler;
+use crate::handlers::r#static::StaticHandler;
 use crate::handlers::sql::SqlHandler;
-use crate::handlers::static_files::StaticHandler;
 use crate::handlers::Handler;
 
 pub const LOG_TARGET: &str = "torii::server::proxy";
@@ -78,12 +83,13 @@ pub fn is_websocket_upgrade(req: &Request<Body>) -> bool {
 }
 
 #[derive(Debug)]
-pub struct Proxy {
+pub struct Proxy<P: Provider + Sync + Send + Debug + 'static> {
     addr: SocketAddr,
     allowed_origins: Option<Vec<String>>,
     handlers: Arc<RwLock<Vec<Box<dyn Handler>>>>,
     version_spec: String,
     tls_config: Option<Arc<ServerConfig>>,
+    _provider: std::marker::PhantomData<P>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,22 +98,26 @@ pub struct TlsConfig {
     pub key_path: String,
 }
 
-impl Proxy {
-    pub fn new(
+impl<P: Provider + Sync + Send + Debug + 'static> Proxy<P> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new<S: Storage + 'static>(
         addr: SocketAddr,
         allowed_origins: Option<Vec<String>>,
         grpc_addr: Option<SocketAddr>,
         graphql_addr: Option<SocketAddr>,
-        artifacts_addr: Option<SocketAddr>,
+        artifacts_dir: Utf8PathBuf,
         pool: Arc<SqlitePool>,
+        storage: Arc<S>,
+        provider: P,
         version_spec: String,
     ) -> Self {
         let handlers: Arc<RwLock<Vec<Box<dyn Handler>>>> = Arc::new(RwLock::new(vec![
             Box::new(GraphQLHandler::new(graphql_addr)),
             Box::new(GrpcHandler::new(grpc_addr)),
             Box::new(McpHandler::new(pool.clone())),
+            Box::new(MetadataHandler::new(storage.clone(), provider)),
             Box::new(SqlHandler::new(pool.clone())),
-            Box::new(StaticHandler::new(artifacts_addr)),
+            Box::new(StaticHandler::new(artifacts_dir, (*pool).clone())),
         ]));
 
         Self {
@@ -116,6 +126,7 @@ impl Proxy {
             handlers,
             version_spec,
             tls_config: None,
+            _provider: std::marker::PhantomData,
         }
     }
 
@@ -248,7 +259,9 @@ impl Proxy {
                                                 .with_upgrades() // Enable connection upgrades for WebSocket over TLS
                                                 .await
                                             {
-                                                error!(target: LOG_TARGET, error = ?e, "Serving connection.");
+                                                // Connection errors are common in production (client disconnects, timeouts, etc.)
+                                                // Log at debug level to reduce noise, but include remote address for debugging
+                                                debug!(target: LOG_TARGET, remote_addr = %remote_addr, error = ?e, "Serving connection.");
                                             }
                                         }
                                         Err(_) => {

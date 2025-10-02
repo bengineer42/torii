@@ -13,9 +13,9 @@ use torii_math::I256;
 use torii_proto::schema::Entity;
 
 use torii_proto::{
-    ContractCursor, Controller, ControllerQuery, Event, EventQuery, Model, Page, Query, Token,
-    TokenBalance, TokenBalanceQuery, TokenCollection, TokenQuery, Transaction, TransactionCall,
-    TransactionQuery,
+    Contract, ContractCursor, ContractQuery, Controller, ControllerQuery, Event, EventQuery, Model,
+    Page, Query, Token, TokenBalance, TokenBalanceQuery, TokenContract, TokenContractQuery,
+    TokenQuery, TokenTransfer, TokenTransferQuery, Transaction, TransactionCall, TransactionQuery,
 };
 
 pub mod utils;
@@ -27,9 +27,6 @@ pub type StorageError = Box<dyn Error + Send + Sync>;
 #[async_trait]
 pub trait ReadOnlyStorage: Send + Sync + Debug {
     fn as_read_only(&self) -> &dyn ReadOnlyStorage;
-
-    /// Returns the cursors for all contracts.
-    async fn cursors(&self) -> Result<HashMap<Felt, ContractCursor>, StorageError>;
 
     /// Returns the model metadata for the storage.
     async fn model(&self, model: Felt) -> Result<Model, StorageError>;
@@ -44,6 +41,9 @@ pub trait ReadOnlyStorage: Send + Sync + Debug {
     /// Returns the controllers for the storage.
     async fn controllers(&self, query: &ControllerQuery) -> Result<Page<Controller>, StorageError>;
 
+    /// Returns the contracts for the storage.
+    async fn contracts(&self, query: &ContractQuery) -> Result<Vec<Contract>, StorageError>;
+
     /// Returns the tokens for the storage.
     async fn tokens(&self, query: &TokenQuery) -> Result<Page<Token>, StorageError>;
 
@@ -53,11 +53,17 @@ pub trait ReadOnlyStorage: Send + Sync + Debug {
         query: &TokenBalanceQuery,
     ) -> Result<Page<TokenBalance>, StorageError>;
 
-    /// Returns the token collections for the storage.
-    async fn token_collections(
+    /// Returns the token contracts for the storage.
+    async fn token_contracts(
         &self,
-        query: &TokenBalanceQuery,
-    ) -> Result<Page<TokenCollection>, StorageError>;
+        query: &TokenContractQuery,
+    ) -> Result<Page<TokenContract>, StorageError>;
+
+    /// Returns token transfers for the storage.
+    async fn token_transfers(
+        &self,
+        query: &TokenTransferQuery,
+    ) -> Result<Page<TokenTransfer>, StorageError>;
 
     /// Returns transactions for the storage.
     async fn transactions(

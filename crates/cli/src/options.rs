@@ -9,7 +9,7 @@ use merge_options::MergeOptions;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use starknet::core::types::Felt;
-use torii_proto::{Contract, ContractType};
+use torii_proto::{ContractDefinition, ContractType};
 use torii_sqlite_types::{Hook, HookEvent, ModelIndices};
 
 pub const DEFAULT_HTTP_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -30,6 +30,7 @@ pub const DEFAULT_GRPC_SUBSCRIPTION_BUFFER_SIZE: usize = 256;
 pub const DEFAULT_GRPC_TCP_KEEPALIVE_SECS: u64 = 60;
 pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 10;
+pub const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 pub const DEFAULT_ERC_MAX_METADATA_TASKS: usize = 100;
 pub const DEFAULT_DATABASE_WAL_AUTO_CHECKPOINT: u64 = 10000;
@@ -127,11 +128,13 @@ pub struct IndexingOptions {
 
     /// Enable indexing pending blocks
     #[arg(
-        long = "indexing.pending",
+        long = "indexing.preconfirmed",
+        alias = "indexing.pending",
         default_value_t = true,
         help = "Whether or not to index pending blocks."
     )]
-    pub pending: bool,
+    #[serde(alias = "pending")]
+    pub preconfirmed: bool,
 
     /// Polling interval in ms
     #[arg(
@@ -162,11 +165,11 @@ pub struct IndexingOptions {
         long = "indexing.contracts",
         value_delimiter = ',',
         value_parser = parse_erc_contract,
-        help = "The list of contracts to index, in the following format: contract_type:address. Supported contract types include ERC20, ERC721, ERC1155, WORLD, UDC, OTHER."
+        help = "The list of contracts to index, in the following format: contract_type:address or contract_type:address:starting_block. Supported contract types include ERC20, ERC721, ERC1155, WORLD, UDC, OTHER."
     )]
     #[serde(deserialize_with = "deserialize_contracts")]
     #[serde(serialize_with = "serialize_contracts")]
-    pub contracts: Vec<Contract>,
+    pub contracts: Vec<ContractDefinition>,
 
     /// Namespaces to index
     #[arg(
@@ -229,7 +232,7 @@ impl Default for IndexingOptions {
             events_chunk_size: DEFAULT_EVENTS_CHUNK_SIZE,
             blocks_chunk_size: DEFAULT_BLOCKS_CHUNK_SIZE,
             batch_chunk_size: DEFAULT_BATCH_CHUNK_SIZE,
-            pending: true,
+            preconfirmed: true,
             polling_interval: DEFAULT_POLLING_INTERVAL,
             max_concurrent_tasks: DEFAULT_MAX_CONCURRENT_TASKS,
             transactions: false,
@@ -640,6 +643,14 @@ pub struct GrpcOptions {
         help = "HTTP/2 keepalive timeout in seconds for gRPC connections. How long to wait for keepalive ping responses."
     )]
     pub http2_keepalive_timeout: u64,
+
+    /// Maximum size in bytes for gRPC messages (both incoming and outgoing).
+    #[arg(
+        long = "grpc.max_message_size",
+        default_value_t = DEFAULT_GRPC_MAX_MESSAGE_SIZE,
+        help = "Maximum size in bytes for gRPC messages (both incoming and outgoing). Default is 16MB."
+    )]
+    pub max_message_size: usize,
 }
 
 impl GrpcOptions {
@@ -679,6 +690,7 @@ impl Default for GrpcOptions {
             tcp_keepalive_interval: DEFAULT_GRPC_TCP_KEEPALIVE_SECS,
             http2_keepalive_interval: DEFAULT_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS,
             http2_keepalive_timeout: DEFAULT_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS,
+            max_message_size: DEFAULT_GRPC_MAX_MESSAGE_SIZE,
         }
     }
 }
@@ -767,22 +779,41 @@ fn parse_hook(part: &str) -> anyhow::Result<Hook> {
 }
 
 // Parses clap cli argument which is expected to be in the format:
-// - contract_type:address
-fn parse_erc_contract(part: &str) -> anyhow::Result<Contract> {
+// - contract_type:address or contract_type:address:starting_block
+fn parse_erc_contract(part: &str) -> anyhow::Result<ContractDefinition> {
     match part.split(':').collect::<Vec<&str>>().as_slice() {
         [r#type, address] => {
             let r#type = r#type.parse::<ContractType>()?;
 
             let address = Felt::from_str(address)
                 .with_context(|| format!("Expected address, found {}", address))?;
-            Ok(Contract { address, r#type })
+            Ok(ContractDefinition {
+                address,
+                r#type,
+                starting_block: None,
+            })
         }
-        _ => Err(anyhow::anyhow!("Invalid contract format")),
+        [r#type, address, starting_block] => {
+            let r#type = r#type.parse::<ContractType>()?;
+
+            let address = Felt::from_str(address)
+                .with_context(|| format!("Expected address, found {}", address))?;
+
+            let starting_block = starting_block.parse::<u64>()
+                .with_context(|| format!("Expected block number, found {}", starting_block))?;
+
+            Ok(ContractDefinition {
+                address,
+                r#type,
+                starting_block: Some(starting_block),
+            })
+        }
+        _ => Err(anyhow::anyhow!("Invalid contract format. Expected format: contract_type:address or contract_type:address:starting_block")),
     }
 }
 
 // Add this function to handle TOML deserialization
-fn deserialize_contracts<'de, D>(deserializer: D) -> Result<Vec<Contract>, D::Error>
+fn deserialize_contracts<'de, D>(deserializer: D) -> Result<Vec<ContractDefinition>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -793,7 +824,10 @@ where
         .collect()
 }
 
-fn serialize_contracts<S>(contracts: &Vec<Contract>, serializer: S) -> Result<S::Ok, S::Error>
+fn serialize_contracts<S>(
+    contracts: &Vec<ContractDefinition>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {

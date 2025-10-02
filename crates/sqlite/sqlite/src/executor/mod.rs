@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cainome::cairo_serde::{ByteArray, CairoSerde};
 use dojo_types::schema::{Struct, Ty};
 use erc::UpdateTokenMetadataQuery;
+use metrics::{counter, histogram};
 use sqlx::{Executor as SqlxExecutor, FromRow, Pool, Sqlite, Transaction as SqlxTransaction};
 use starknet::core::types::requests::CallRequest;
 use starknet::core::types::{BlockId, BlockTag, Felt, FunctionCall, U256};
@@ -17,10 +18,11 @@ use tokio::sync::oneshot;
 use tokio::time::Instant;
 use torii_broker::types::{
     ContractUpdate, EntityUpdate, EventMessageUpdate, EventUpdate, InnerType, ModelUpdate,
-    TokenBalanceUpdate, TokenUpdate, TransactionUpdate, Update,
+    TokenBalanceUpdate, TokenTransferUpdate, TokenUpdate, TransactionUpdate, Update,
 };
 use torii_math::I256;
 use torii_proto::{ContractCursor, TransactionCall};
+use torii_sqlite_types::TokenTransfer as SQLTokenTransfer;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::TOKENS_TABLE;
@@ -58,6 +60,7 @@ pub enum BrokerMessage {
     EventEmitted(<EventUpdate as InnerType>::Inner),
     TokenRegistered(<TokenUpdate as InnerType>::Inner),
     TokenBalanceUpdated(<TokenBalanceUpdate as InnerType>::Inner),
+    TokenTransfer(<TokenTransferUpdate as InnerType>::Inner),
     Transaction(<TransactionUpdate as InnerType>::Inner),
 }
 
@@ -124,6 +127,7 @@ pub enum QueryType {
     RegisterTokenContract(RegisterTokenContractQuery),
     RegisterModel,
     StoreEvent,
+    StoreTokenTransfer,
     UpdateTokenMetadata(UpdateTokenMetadataQuery),
     Execute,
     Rollback,
@@ -146,6 +150,7 @@ impl std::fmt::Display for QueryType {
                 QueryType::RegisterTokenContract(_) => "RegisterTokenContract",
                 QueryType::RegisterModel => "RegisterModel",
                 QueryType::StoreEvent => "StoreEvent",
+                QueryType::StoreTokenTransfer => "StoreTokenTransfer",
                 QueryType::UpdateTokenMetadata(_) => "UpdateTokenMetadata",
                 QueryType::Execute => "Execute",
                 QueryType::Rollback => "Rollback",
@@ -290,6 +295,9 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
     }
 
     async fn handle_query_message(&mut self, query_message: QueryMessage) -> QueryResult<()> {
+        let start_time = Instant::now();
+        let query_type_str = format!("{}", query_message.query_type);
+
         let tx = self.transaction.as_mut().unwrap();
 
         let mut query = sqlx::query(&query_message.statement);
@@ -307,14 +315,14 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         match query_message.query_type {
             QueryType::UpdateCursors(update_cursors) => {
                 // Read all cursors from db
-                let mut cursors: Vec<torii_sqlite_types::ContractCursor> =
+                let mut contracts: Vec<torii_sqlite_types::Contract> =
                     sqlx::query_as("SELECT * FROM contracts")
                         .fetch_all(&mut **tx)
                         .await?;
 
                 let mut updates = Vec::with_capacity(update_cursors.cursors.len());
 
-                for cursor in &mut cursors {
+                for cursor in &mut contracts {
                     let new_cursor = update_cursors
                         .cursors
                         .get(&Felt::from_str(&cursor.contract_address).unwrap())
@@ -358,7 +366,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                     sqlx::query(
                         "UPDATE contracts SET head = ?, last_block_timestamp = ?, \
-                         last_pending_block_tx = ? WHERE id = \
+                         last_pending_block_tx = ?, updated_at = CURRENT_TIMESTAMP WHERE id = \
                          ?",
                     )
                     .bind(cursor.head)
@@ -604,6 +612,13 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 let event = torii_sqlite_types::Event::from_row(&row)?;
                 self.publish_optimistic_and_queue(BrokerMessage::EventEmitted(event.into()));
             }
+            QueryType::StoreTokenTransfer => {
+                let row = query.fetch_one(&mut **tx).await?;
+                let token_transfer = SQLTokenTransfer::from_row(&row)?;
+                self.publish_optimistic_and_queue(BrokerMessage::TokenTransfer(
+                    token_transfer.into(),
+                ));
+            }
             QueryType::ApplyBalanceDiff(apply_balance_diff) => {
                 debug!(target: LOG_TARGET, "Applying balance diff.");
                 let instant = Instant::now();
@@ -769,9 +784,9 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     felt_to_sql_string(&update_metadata.contract_address)
                 };
 
-                // Update metadata in database
+                // Update metadata and timestamp in database
                 let token = sqlx::query_as::<_, torii_sqlite_types::Token>(
-                    "UPDATE tokens SET metadata = ? WHERE id = ? RETURNING *",
+                    "UPDATE tokens SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING *",
                 )
                 .bind(&update_metadata.metadata)
                 .bind(&id)
@@ -785,6 +800,20 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 query.execute(&mut **tx).await?;
             }
         }
+
+        // Record metrics
+        let duration = start_time.elapsed();
+        histogram!(
+            "torii_executor_query_duration_seconds",
+            "query_type" => query_type_str.clone()
+        )
+        .record(duration.as_secs_f64());
+        counter!(
+            "torii_executor_queries_total",
+            "query_type" => query_type_str,
+            "status" => "success"
+        )
+        .increment(1);
 
         Ok(())
     }
@@ -803,6 +832,10 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
             send_broker_message(message, false);
         }
 
+        // Record metrics
+        counter!("torii_executor_transaction_operations_total", "operation" => "execute", "status" => "success")
+            .increment(1);
+
         Ok(())
     }
 
@@ -817,6 +850,11 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         self.transaction = Some(self.pool.begin().await?);
 
         self.publish_queue.clear();
+
+        // Record metrics
+        counter!("torii_executor_transaction_operations_total", "operation" => "rollback", "status" => "success")
+            .increment(1);
+
         Ok(())
     }
 
@@ -846,6 +884,9 @@ fn send_broker_message(message: BrokerMessage, optimistic: bool) {
         }
         BrokerMessage::TokenBalanceUpdated(token_balance) => {
             MemoryBroker::publish(Update::new(token_balance, optimistic))
+        }
+        BrokerMessage::TokenTransfer(token_transfer) => {
+            MemoryBroker::publish(Update::new(token_transfer, optimistic))
         }
         BrokerMessage::Transaction(transaction) => {
             MemoryBroker::publish(Update::new(transaction, optimistic))

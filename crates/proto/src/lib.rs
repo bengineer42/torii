@@ -39,7 +39,6 @@ use strum_macros::{AsRefStr, EnumIter, FromRepr};
 pub struct ContractCursor {
     pub contract_address: Felt,
     pub head: Option<u64>,
-    pub tps: Option<u64>,
     pub last_block_timestamp: Option<u64>,
     pub last_pending_block_tx: Option<Felt>,
 }
@@ -53,6 +52,34 @@ pub enum ContractType {
     Contract,
     UDC,
     OTHER,
+}
+
+impl From<proto::types::ContractType> for ContractType {
+    fn from(value: proto::types::ContractType) -> Self {
+        match value {
+            proto::types::ContractType::World => ContractType::WORLD,
+            proto::types::ContractType::Erc20 => ContractType::ERC20,
+            proto::types::ContractType::Erc721 => ContractType::ERC721,
+            proto::types::ContractType::Erc1155 => ContractType::ERC1155,
+            proto::types::ContractType::Udc => ContractType::UDC,
+            proto::types::ContractType::Other => ContractType::OTHER,
+        }
+    }
+}
+
+impl TryFrom<i32> for ContractType {
+    type Error = ProtoError;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ContractType::WORLD),
+            1 => Ok(ContractType::ERC20),
+            2 => Ok(ContractType::ERC721),
+            3 => Ok(ContractType::ERC1155),
+            4 => Ok(ContractType::UDC),
+            5 => Ok(ContractType::OTHER),
+            _ => Err(ProtoError::InvalidContractType(value.to_string())),
+        }
+    }
 }
 
 impl FromStr for ContractType {
@@ -86,15 +113,96 @@ impl std::fmt::Display for ContractType {
     }
 }
 
-#[derive(Deserialize, Debug, Clone, PartialEq, Eq, Hash, Copy)]
-pub struct Contract {
+/// Simple contract representation for CLI and basic usage
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
+pub struct ContractDefinition {
     pub address: Felt,
     pub r#type: ContractType,
+    pub starting_block: Option<u64>,
+}
+
+/// Full contract representation with metadata for storage/indexing
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
+pub struct Contract {
+    pub contract_address: Felt,
+    pub contract_type: ContractType,
+    pub head: Option<u64>,
+    pub tps: Option<u64>,
+    pub last_block_timestamp: Option<u64>,
+    pub last_pending_block_tx: Option<Felt>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl std::fmt::Display for ContractDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(starting_block) = self.starting_block {
+            write!(f, "{}:{:#x}:{}", self.r#type, self.address, starting_block)
+        } else {
+            write!(f, "{}:{:#x}", self.r#type, self.address)
+        }
+    }
 }
 
 impl std::fmt::Display for Contract {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{:#x}", self.r#type, self.address)
+        write!(f, "{}:{:#x}", self.contract_type, self.contract_address)
+    }
+}
+
+impl From<Contract> for ContractCursor {
+    fn from(contract: Contract) -> Self {
+        Self {
+            contract_address: contract.contract_address,
+            head: contract.head,
+            last_block_timestamp: contract.last_block_timestamp,
+            last_pending_block_tx: contract.last_pending_block_tx,
+        }
+    }
+}
+
+impl From<Contract> for ContractDefinition {
+    fn from(contract: Contract) -> Self {
+        Self {
+            address: contract.contract_address,
+            r#type: contract.contract_type,
+            starting_block: contract.head,
+        }
+    }
+}
+
+impl From<Contract> for proto::types::Contract {
+    fn from(value: Contract) -> Self {
+        Self {
+            contract_address: value.contract_address.to_bytes_be().into(),
+            contract_type: value.contract_type as i32,
+            head: value.head,
+            tps: value.tps,
+            last_block_timestamp: value.last_block_timestamp,
+            last_pending_block_tx: value
+                .last_pending_block_tx
+                .map(|tx| tx.to_bytes_be().into()),
+            updated_at: value.updated_at.timestamp() as u64,
+            created_at: value.created_at.timestamp() as u64,
+        }
+    }
+}
+
+impl TryFrom<proto::types::Contract> for Contract {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::Contract) -> Result<Self, Self::Error> {
+        Ok(Self {
+            contract_address: Felt::from_bytes_be_slice(&value.contract_address),
+            contract_type: value.contract_type().into(),
+            head: value.head,
+            tps: value.tps,
+            last_block_timestamp: value.last_block_timestamp,
+            last_pending_block_tx: value
+                .last_pending_block_tx
+                .map(|tx| Felt::from_bytes_be_slice(&tx)),
+            updated_at: DateTime::from_timestamp(value.updated_at as i64, 0).unwrap(),
+            created_at: DateTime::from_timestamp(value.created_at as i64, 0).unwrap(),
+        })
     }
 }
 
@@ -227,54 +335,43 @@ impl TryFrom<proto::types::Token> for Token {
         })
     }
 }
-impl TryFrom<proto::types::TokenCollection> for Token {
-    type Error = ProtoError;
-    fn try_from(value: proto::types::TokenCollection) -> Result<Self, Self::Error> {
-        Ok(Self {
-            token_id: None,
-            contract_address: Felt::from_bytes_be_slice(&value.contract_address),
-            name: value.name,
-            symbol: value.symbol,
-            decimals: value.decimals as u8,
-            metadata: String::from_utf8(value.metadata).map_err(ProtoError::FromUtf8)?,
-            total_supply: None,
-        })
-    }
-}
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone, Default)]
-pub struct TokenCollection {
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
+pub struct TokenContract {
     pub contract_address: Felt,
+    pub r#type: ContractType,
     pub name: String,
     pub symbol: String,
     pub decimals: u8,
-    pub count: u32,
     pub metadata: String,
+    pub total_supply: Option<U256>,
 }
 
-impl From<TokenCollection> for proto::types::TokenCollection {
-    fn from(value: TokenCollection) -> Self {
+impl From<TokenContract> for proto::types::TokenContract {
+    fn from(value: TokenContract) -> Self {
         Self {
             contract_address: value.contract_address.to_bytes_be().into(),
+            contract_type: value.r#type as i32,
             name: value.name,
             symbol: value.symbol,
             decimals: value.decimals as u32,
-            count: value.count,
             metadata: value.metadata.into_bytes(),
+            total_supply: value.total_supply.map(|s| s.to_be_bytes().to_vec()),
         }
     }
 }
 
-impl TryFrom<proto::types::TokenCollection> for TokenCollection {
+impl TryFrom<proto::types::TokenContract> for TokenContract {
     type Error = ProtoError;
-    fn try_from(value: proto::types::TokenCollection) -> Result<Self, Self::Error> {
+    fn try_from(value: proto::types::TokenContract) -> Result<Self, Self::Error> {
         Ok(Self {
             contract_address: Felt::from_bytes_be_slice(&value.contract_address),
+            r#type: value.contract_type().into(),
             name: value.name,
             symbol: value.symbol,
             decimals: value.decimals as u8,
-            count: value.count,
             metadata: String::from_utf8(value.metadata).map_err(ProtoError::FromUtf8)?,
+            total_supply: value.total_supply.map(|s| U256::from_be_slice(&s)),
         })
     }
 }
@@ -306,6 +403,104 @@ impl TryFrom<proto::types::TokenBalance> for TokenBalance {
             account_address: Felt::from_bytes_be_slice(&value.account_address),
             contract_address: Felt::from_bytes_be_slice(&value.contract_address),
             token_id: value.token_id.map(|id| U256::from_be_slice(&id)),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone, Default)]
+pub struct TokenTransfer {
+    pub id: String,
+    pub contract_address: Felt,
+    pub from_address: Felt,
+    pub to_address: Felt,
+    pub amount: U256,
+    pub token_id: Option<U256>,
+    pub executed_at: DateTime<Utc>,
+    pub event_id: Option<String>,
+}
+
+impl From<TokenTransfer> for proto::types::TokenTransfer {
+    fn from(value: TokenTransfer) -> Self {
+        Self {
+            id: value.id,
+            contract_address: value.contract_address.to_bytes_be().into(),
+            from_address: value.from_address.to_bytes_be().into(),
+            to_address: value.to_address.to_bytes_be().into(),
+            amount: value.amount.to_be_bytes().to_vec(),
+            token_id: value.token_id.map(|id| id.to_be_bytes().to_vec()),
+            executed_at: value.executed_at.timestamp() as u64,
+            event_id: value.event_id,
+        }
+    }
+}
+
+impl TryFrom<proto::types::TokenTransfer> for TokenTransfer {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::TokenTransfer) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            contract_address: Felt::from_bytes_be_slice(&value.contract_address),
+            from_address: Felt::from_bytes_be_slice(&value.from_address),
+            to_address: Felt::from_bytes_be_slice(&value.to_address),
+            amount: U256::from_be_slice(&value.amount),
+            token_id: value.token_id.map(|id| U256::from_be_slice(&id)),
+            executed_at: DateTime::from_timestamp(value.executed_at as i64, 0).unwrap(),
+            event_id: value.event_id,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone, Default)]
+pub struct TokenTransferQuery {
+    pub account_addresses: Vec<Felt>,
+    pub contract_addresses: Vec<Felt>,
+    pub token_ids: Vec<U256>,
+    pub pagination: Pagination,
+}
+
+impl From<TokenTransferQuery> for proto::types::TokenTransferQuery {
+    fn from(value: TokenTransferQuery) -> Self {
+        Self {
+            account_addresses: value
+                .account_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().into())
+                .collect(),
+            contract_addresses: value
+                .contract_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().into())
+                .collect(),
+            token_ids: value
+                .token_ids
+                .into_iter()
+                .map(|id| id.to_be_bytes().to_vec())
+                .collect(),
+            pagination: Some(value.pagination.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::types::TokenTransferQuery> for TokenTransferQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::TokenTransferQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            account_addresses: value
+                .account_addresses
+                .into_iter()
+                .map(|a| Felt::from_bytes_be_slice(&a))
+                .collect(),
+            contract_addresses: value
+                .contract_addresses
+                .into_iter()
+                .map(|a| Felt::from_bytes_be_slice(&a))
+                .collect(),
+            token_ids: value
+                .token_ids
+                .into_iter()
+                .map(|id| U256::from_be_slice(&id))
+                .collect(),
+            pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
         })
     }
 }
@@ -398,6 +593,13 @@ pub struct TokenBalanceQuery {
     pub pagination: Pagination,
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
+pub struct TokenContractQuery {
+    pub contract_addresses: Vec<Felt>,
+    pub contract_types: Vec<ContractType>,
+    pub pagination: Pagination,
+}
+
 impl From<TokenBalanceQuery> for proto::types::TokenBalanceQuery {
     fn from(value: TokenBalanceQuery) -> Self {
         Self {
@@ -445,22 +647,77 @@ impl TryFrom<proto::types::TokenBalanceQuery> for TokenBalanceQuery {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
-pub struct IndexerUpdate {
-    pub head: i64,
-    pub tps: i64,
-    pub last_block_timestamp: i64,
-    pub contract_address: Felt,
+impl From<TokenContractQuery> for proto::types::TokenContractQuery {
+    fn from(value: TokenContractQuery) -> Self {
+        Self {
+            contract_addresses: value
+                .contract_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().into())
+                .collect(),
+            contract_types: value.contract_types.into_iter().map(|t| t as i32).collect(),
+            pagination: Some(value.pagination.into()),
+        }
+    }
 }
 
-impl From<proto::world::SubscribeIndexerResponse> for IndexerUpdate {
-    fn from(value: proto::world::SubscribeIndexerResponse) -> Self {
+impl TryFrom<proto::types::TokenContractQuery> for TokenContractQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::TokenContractQuery) -> Result<Self, Self::Error> {
+        let contract_types = value
+            .contract_types
+            .into_iter()
+            .map(|t| t.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            contract_addresses: value
+                .contract_addresses
+                .into_iter()
+                .map(|a| Felt::from_bytes_be_slice(&a))
+                .collect(),
+            contract_types,
+            pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
+pub struct ContractQuery {
+    pub contract_addresses: Vec<Felt>,
+    pub contract_types: Vec<ContractType>,
+}
+
+impl From<ContractQuery> for proto::types::ContractQuery {
+    fn from(value: ContractQuery) -> Self {
         Self {
-            head: value.head,
-            tps: value.tps,
-            last_block_timestamp: value.last_block_timestamp,
-            contract_address: Felt::from_bytes_be_slice(&value.contract_address),
+            contract_addresses: value
+                .contract_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().into())
+                .collect(),
+            contract_types: value.contract_types.into_iter().map(|t| t as i32).collect(),
         }
+    }
+}
+
+impl TryFrom<proto::types::ContractQuery> for ContractQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::ContractQuery) -> Result<Self, Self::Error> {
+        let contract_types = value
+            .contract_types
+            .into_iter()
+            .map(|t| t.try_into())
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            contract_addresses: value
+                .contract_addresses
+                .into_iter()
+                .map(|a| Felt::from_bytes_be_slice(&a))
+                .collect(),
+            contract_types,
+        })
     }
 }
 

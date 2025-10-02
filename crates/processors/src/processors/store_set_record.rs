@@ -9,6 +9,7 @@ use tracing::{debug, info};
 use crate::error::Error;
 use crate::task_manager::TaskId;
 use crate::{EventProcessor, EventProcessorConfig, EventProcessorContext, IndexingMode};
+use metrics::counter;
 
 pub(crate) const LOG_TARGET: &str = "torii::indexer::processors::store_set_record";
 
@@ -93,10 +94,10 @@ where
             "Store set record.",
         );
 
-        let mut keys_and_unpacked = [event.keys.clone(), event.values].concat();
+        let mut keys_and_values = [event.keys.clone(), event.values].concat();
 
         let mut entity = model.schema;
-        entity.deserialize(&mut keys_and_unpacked, model.use_legacy_store)?;
+        entity.deserialize(&mut keys_and_values, model.use_legacy_store)?;
 
         ctx.storage
             .set_entity(
@@ -105,9 +106,19 @@ where
                 ctx.block_timestamp,
                 event.entity_id,
                 event.selector,
-                Some(event.keys.clone()),
+                Some(event.keys),
             )
             .await?;
+
+        // Record successful entity storage with context
+        counter!(
+            "torii_processor_operations_total",
+            "operation" => "entity_set",
+            "namespace" => model.namespace.clone(),
+            "model_name" => model.name.clone()
+        )
+        .increment(1);
+
         Ok(())
     }
 }

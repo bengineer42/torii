@@ -5,13 +5,14 @@ use torii_proto::{
     Clause, ComparisonOperator, KeysClause, LogicalOperator, MemberValue, PatternMatching,
 };
 
+pub mod contract;
 pub mod entity;
 pub mod error;
 pub mod event;
 pub mod event_message;
-pub mod indexer;
 pub mod token;
 pub mod token_balance;
+pub mod token_transfer;
 pub mod transaction;
 
 pub(crate) fn match_entity(

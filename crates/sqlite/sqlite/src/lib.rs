@@ -7,7 +7,7 @@ use sqlx::{Pool, Sqlite};
 use starknet::core::types::Felt;
 use tokio::sync::mpsc::UnboundedSender;
 use torii_cache::Cache;
-use torii_proto::Contract;
+use torii_proto::ContractDefinition;
 use torii_storage::Storage;
 
 use crate::error::{Error, ParseError};
@@ -56,7 +56,7 @@ impl Sql {
     pub async fn new(
         pool: Pool<Sqlite>,
         executor: UnboundedSender<QueryMessage>,
-        contracts: &[Contract],
+        contracts: &[ContractDefinition],
     ) -> Result<Self, Error> {
         Self::new_with_config(pool, executor, contracts, Default::default()).await
     }
@@ -64,18 +64,19 @@ impl Sql {
     pub async fn new_with_config(
         pool: Pool<Sqlite>,
         executor: UnboundedSender<QueryMessage>,
-        contracts: &[Contract],
+        contracts: &[ContractDefinition],
         config: SqlConfig,
     ) -> Result<Self, Error> {
         for contract in contracts {
             executor.send(QueryMessage::other(
-                "INSERT OR IGNORE INTO contracts (id, contract_address, contract_type) VALUES (?, \
-                 ?, ?)"
+                "INSERT OR IGNORE INTO contracts (id, contract_address, contract_type, updated_at) VALUES (?, \
+                 ?, ?, CURRENT_TIMESTAMP)"
                     .to_string(),
                 vec![
                     Argument::FieldElement(contract.address),
                     Argument::FieldElement(contract.address),
                     Argument::String(contract.r#type.to_string()),
+                    Argument::Int(contract.starting_block.map_or(0, |b| b - 1) as i64),
                 ],
             )).map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
         }

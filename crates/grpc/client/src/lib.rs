@@ -18,23 +18,25 @@ use tonic::transport::Endpoint;
 
 use torii_proto::error::ProtoError;
 use torii_proto::proto::world::{
-    world_client, PublishMessageBatchRequest, PublishMessageRequest, RetrieveControllersRequest,
-    RetrieveControllersResponse, RetrieveEntitiesRequest, RetrieveEntitiesResponse,
-    RetrieveEventMessagesRequest, RetrieveEventsRequest, RetrieveEventsResponse,
-    RetrieveTokenBalancesRequest, RetrieveTokenBalancesResponse, RetrieveTokenCollectionsRequest,
-    RetrieveTokenCollectionsResponse, RetrieveTokensRequest, RetrieveTokensResponse,
-    RetrieveTransactionsRequest, RetrieveTransactionsResponse, SubscribeEntitiesRequest,
-    SubscribeEntityResponse, SubscribeEventMessagesRequest, SubscribeEventsRequest,
-    SubscribeEventsResponse, SubscribeIndexerRequest, SubscribeIndexerResponse,
-    SubscribeTokenBalancesRequest, SubscribeTokenBalancesResponse, SubscribeTokensRequest,
-    SubscribeTokensResponse, SubscribeTransactionsRequest, SubscribeTransactionsResponse,
-    UpdateEntitiesSubscriptionRequest, UpdateEventMessagesSubscriptionRequest,
-    UpdateTokenBalancesSubscriptionRequest, UpdateTokenSubscriptionRequest, WorldMetadataRequest,
+    world_client, PublishMessageBatchRequest, PublishMessageRequest, RetrieveContractsRequest,
+    RetrieveContractsResponse, RetrieveControllersRequest, RetrieveControllersResponse,
+    RetrieveEntitiesRequest, RetrieveEntitiesResponse, RetrieveEventMessagesRequest,
+    RetrieveEventsRequest, RetrieveEventsResponse, RetrieveTokenBalancesRequest,
+    RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest, RetrieveTokenContractsResponse,
+    RetrieveTokensRequest, RetrieveTokensResponse, RetrieveTransactionsRequest,
+    RetrieveTransactionsResponse, SubscribeContractsRequest, SubscribeContractsResponse,
+    SubscribeEntitiesRequest, SubscribeEntityResponse, SubscribeEventMessagesRequest,
+    SubscribeEventsRequest, SubscribeEventsResponse, SubscribeTokenBalancesRequest,
+    SubscribeTokenBalancesResponse, SubscribeTokensRequest, SubscribeTokensResponse,
+    SubscribeTransactionsRequest, SubscribeTransactionsResponse, UpdateEntitiesSubscriptionRequest,
+    UpdateEventMessagesSubscriptionRequest, UpdateTokenBalancesSubscriptionRequest,
+    UpdateTokenSubscriptionRequest, WorldMetadataRequest,
 };
 use torii_proto::schema::Entity;
 use torii_proto::{
-    Clause, ControllerQuery, Event, EventQuery, IndexerUpdate, KeysClause, Message, Query, Token,
-    TokenBalance, TokenBalanceQuery, TokenQuery, Transaction, TransactionFilter, TransactionQuery,
+    Clause, Contract, ContractQuery, ControllerQuery, Event, EventQuery, KeysClause, Message,
+    Query, Token, TokenBalance, TokenBalanceQuery, TokenContractQuery, TokenQuery, Transaction,
+    TransactionFilter, TransactionQuery,
 };
 
 pub use torii_proto as types;
@@ -57,6 +59,9 @@ pub enum Error {
     Proto(#[from] ProtoError),
 }
 
+// Default max message size for the client
+const DEFAULT_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 /// A lightweight wrapper around the grpc client.
 pub struct WorldClient {
@@ -70,6 +75,15 @@ pub struct WorldClient {
 impl WorldClient {
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn new(dst: String, world_address: Felt) -> Result<Self, Error> {
+        Self::new_with_config(dst, world_address, DEFAULT_MAX_MESSAGE_SIZE).await
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn new_with_config(
+        dst: String,
+        world_address: Felt,
+        max_message_size: usize,
+    ) -> Result<Self, Error> {
         const KEEPALIVE_TIME: u64 = 60;
 
         let endpoint = Endpoint::from_shared(dst.clone())
@@ -80,18 +94,31 @@ impl WorldClient {
             _world_address: world_address,
             inner: world_client::WorldClient::with_origin(channel, endpoint.uri().clone())
                 .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip),
+                .send_compressed(CompressionEncoding::Gzip)
+                .max_decoding_message_size(max_message_size)
+                .max_encoding_message_size(max_message_size),
         })
     }
 
     // we make this function async so that we can keep the function signature similar
     #[cfg(target_arch = "wasm32")]
-    pub async fn new(endpoint: String, _world_address: Felt) -> Result<Self, Error> {
+    pub async fn new(endpoint: String, world_address: Felt) -> Result<Self, Error> {
+        Self::new_with_config(endpoint, world_address, DEFAULT_MAX_MESSAGE_SIZE).await
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub async fn new_with_config(
+        endpoint: String,
+        world_address: Felt,
+        max_message_size: usize,
+    ) -> Result<Self, Error> {
         Ok(Self {
-            _world_address,
+            _world_address: world_address,
             inner: world_client::WorldClient::new(tonic_web_wasm_client::Client::new(endpoint))
                 .accept_compressed(CompressionEncoding::Gzip)
-                .send_compressed(CompressionEncoding::Gzip),
+                .send_compressed(CompressionEncoding::Gzip)
+                .max_decoding_message_size(max_message_size)
+                .max_encoding_message_size(max_message_size),
         })
     }
 
@@ -117,6 +144,19 @@ impl WorldClient {
     ) -> Result<RetrieveControllersResponse, Error> {
         self.inner
             .retrieve_controllers(RetrieveControllersRequest {
+                query: Some(query.into()),
+            })
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())
+    }
+
+    pub async fn retrieve_contracts(
+        &mut self,
+        query: ContractQuery,
+    ) -> Result<RetrieveContractsResponse, Error> {
+        self.inner
+            .retrieve_contracts(RetrieveContractsRequest {
                 query: Some(query.into()),
             })
             .await
@@ -239,18 +279,19 @@ impl WorldClient {
             .map(|res| res.into_inner())
     }
 
-    pub async fn retrieve_token_collections(
+    pub async fn retrieve_token_contracts(
         &mut self,
-        query: TokenBalanceQuery,
-    ) -> Result<RetrieveTokenCollectionsResponse, Error> {
+        query: TokenContractQuery,
+    ) -> Result<RetrieveTokenContractsResponse, Error> {
         self.inner
-            .retrieve_token_collections(RetrieveTokenCollectionsRequest {
+            .retrieve_token_contracts(RetrieveTokenContractsRequest {
                 query: Some(query.into()),
             })
             .await
             .map_err(Error::Grpc)
             .map(|res| res.into_inner())
     }
+
     pub async fn retrieve_entities(
         &mut self,
         query: Query,
@@ -293,23 +334,25 @@ impl WorldClient {
             .map(|res| res.into_inner())
     }
 
-    /// Subscribe to indexer updates.
-    pub async fn subscribe_indexer(
+    /// Subscribe to contracts updates.
+    pub async fn subscribe_contracts(
         &mut self,
-        contract_address: Felt,
-    ) -> Result<IndexerUpdateStreaming, Error> {
-        let request = SubscribeIndexerRequest {
-            contract_address: contract_address.to_bytes_be().to_vec(),
+        query: ContractQuery,
+    ) -> Result<ContractUpdateStreaming, Error> {
+        let request = SubscribeContractsRequest {
+            query: Some(query.into()),
         };
         let stream = self
             .inner
-            .subscribe_indexer(request)
+            .subscribe_contracts(request)
             .await
             .map_err(Error::Grpc)
             .map(|res| res.into_inner())?;
-        Ok(IndexerUpdateStreaming(
-            stream.map_ok(Box::new(|res| res.into())),
-        ))
+        Ok(ContractUpdateStreaming(stream.map_ok(Box::new(|res| {
+            res.contract
+                .map(|c| c.try_into().expect("must able to serialize"))
+                .expect("must able to serialize")
+        }))))
     }
 
     /// Subscribe to entities updates of a World.
@@ -599,16 +642,16 @@ impl Stream for EventUpdateStreaming {
     }
 }
 
-type IndexerMappedStream = MapOk<
-    tonic::Streaming<SubscribeIndexerResponse>,
-    Box<dyn Fn(SubscribeIndexerResponse) -> IndexerUpdate + Send>,
+type ContractMappedStream = MapOk<
+    tonic::Streaming<SubscribeContractsResponse>,
+    Box<dyn Fn(SubscribeContractsResponse) -> Contract + Send>,
 >;
 
 #[derive(Debug)]
-pub struct IndexerUpdateStreaming(IndexerMappedStream);
+pub struct ContractUpdateStreaming(ContractMappedStream);
 
-impl Stream for IndexerUpdateStreaming {
-    type Item = <IndexerMappedStream as Stream>::Item;
+impl Stream for ContractUpdateStreaming {
+    type Item = <ContractMappedStream as Stream>::Item;
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

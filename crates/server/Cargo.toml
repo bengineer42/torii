@@ -11,6 +11,7 @@ torii-mcp = { path = "../mcp" }
 anyhow.workspace = true
 base64.workspace = true
 camino.workspace = true
+chrono.workspace = true
 data-url.workspace = true
 http-body = "0.4.5"
 http.workspace = true
@@ -26,7 +27,7 @@ sqlx.workspace = true
 tokio-util = "0.7.7"
 tokio.workspace = true
 torii-sqlite.workspace = true
-tower-http.workspace = true
+tower-http = { workspace = true, features = ["cors"] }
 tower.workspace = true
 tracing.workspace = true
 warp.workspace = true
@@ -36,9 +37,16 @@ tokio-tungstenite = "0.20.0"
 hyper-tungstenite = "0.11.1"
 futures-util.workspace = true
 tokio-stream = "0.1.17"
-uuid = "1.15.1"
+uuid = { version = "1.15.1", features = ["v4"] }
 regex.workspace = true
 torii-processors.workspace = true
+torii-storage.workspace = true
+starknet.workspace = true
+starknet-crypto.workspace = true
+crypto-bigint.workspace = true
+sha2 = "0.10"
+httpdate = "1.0"
+filetime = "0.2"
 
 # TLS dependencies for HTTPS support
 tokio-rustls = "0.24.1"

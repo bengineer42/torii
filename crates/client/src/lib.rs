@@ -3,19 +3,19 @@ pub mod error;
 use crypto_bigint::U256;
 use starknet::core::types::Felt;
 use torii_grpc_client::{
-    EntityUpdateStreaming, EventUpdateStreaming, IndexerUpdateStreaming, TokenBalanceStreaming,
+    ContractUpdateStreaming, EntityUpdateStreaming, EventUpdateStreaming, TokenBalanceStreaming,
     TokenUpdateStreaming, TransactionUpdateStreaming, WorldClient,
 };
 use torii_proto::proto::world::{
-    RetrieveControllersResponse, RetrieveEntitiesResponse, RetrieveEventsResponse,
-    RetrieveTokenBalancesResponse, RetrieveTokenCollectionsResponse, RetrieveTokensResponse,
-    RetrieveTransactionsResponse,
+    RetrieveContractsResponse, RetrieveControllersResponse, RetrieveEntitiesResponse,
+    RetrieveEventsResponse, RetrieveTokenBalancesResponse, RetrieveTokenContractsResponse,
+    RetrieveTokensResponse, RetrieveTransactionsResponse,
 };
 use torii_proto::schema::Entity;
 use torii_proto::{
-    Clause, Controller, ControllerQuery, Event, EventQuery, KeysClause, Message, Page, Query,
-    Token, TokenBalance, TokenBalanceQuery, TokenQuery, Transaction, TransactionFilter,
-    TransactionQuery, World,
+    Clause, Contract, ContractQuery, Controller, ControllerQuery, Event, EventQuery, KeysClause,
+    Message, Page, Query, Token, TokenBalance, TokenBalanceQuery, TokenContract,
+    TokenContractQuery, TokenQuery, Transaction, TransactionFilter, TransactionQuery, World,
 };
 
 use crate::error::Error;
@@ -28,9 +28,25 @@ pub struct Client {
 }
 
 impl Client {
-    /// Returns a initialized [Client].
+    /// Returns a initialized [Client] with default max message size (4MB).
     pub async fn new(torii_url: String, world: Felt) -> Result<Self, Error> {
         let grpc_client = WorldClient::new(torii_url, world).await?;
+
+        Ok(Self { inner: grpc_client })
+    }
+
+    /// Returns a initialized [Client] with custom max message size.
+    ///
+    /// # Arguments
+    /// * `torii_url` - The URL of the Torii server
+    /// * `world` - The world address
+    /// * `max_message_size` - Maximum size in bytes for gRPC messages (both incoming and outgoing)
+    pub async fn new_with_config(
+        torii_url: String,
+        world: Felt,
+        max_message_size: usize,
+    ) -> Result<Self, Error> {
+        let grpc_client = WorldClient::new_with_config(torii_url, world, max_message_size).await?;
 
         Ok(Self { inner: grpc_client })
     }
@@ -78,6 +94,16 @@ impl Client {
         })
     }
 
+    /// Retrieves contracts matching the query parameters.
+    pub async fn contracts(&self, query: ContractQuery) -> Result<Vec<Contract>, Error> {
+        let mut grpc_client = self.inner.clone();
+        let RetrieveContractsResponse { contracts } = grpc_client.retrieve_contracts(query).await?;
+        Ok(contracts
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<Contract>, _>>()?)
+    }
+
     /// Retrieves tokens matching contract addresses.
     pub async fn tokens(&self, query: TokenQuery) -> Result<Page<Token>, Error> {
         let mut grpc_client = self.inner.clone();
@@ -121,18 +147,21 @@ impl Client {
         })
     }
 
-    /// Retrieves tokens matching contract addresses.
-    pub async fn token_collections(&self, query: TokenBalanceQuery) -> Result<Page<Token>, Error> {
+    /// Retrieves token contracts matching the query parameters.
+    pub async fn token_contracts(
+        &self,
+        query: TokenContractQuery,
+    ) -> Result<Page<TokenContract>, Error> {
         let mut grpc_client = self.inner.clone();
-        let RetrieveTokenCollectionsResponse {
-            tokens,
+        let RetrieveTokenContractsResponse {
+            token_contracts,
             next_cursor,
-        } = grpc_client.retrieve_token_collections(query).await?;
+        } = grpc_client.retrieve_token_contracts(query).await?;
         Ok(Page {
-            items: tokens
+            items: token_contracts
                 .into_iter()
                 .map(TryInto::try_into)
-                .collect::<Result<Vec<Token>, _>>()?,
+                .collect::<Result<Vec<TokenContract>, _>>()?,
             next_cursor: if next_cursor.is_empty() {
                 None
             } else {
@@ -292,13 +321,16 @@ impl Client {
 
     /// Subscribe to indexer updates for a specific contract address.
     /// If no contract address is provided, it will subscribe to updates for world contract.
-    pub async fn on_indexer_updated(
+    pub async fn on_contract_updated(
         &self,
         contract_address: Option<Felt>,
-    ) -> Result<IndexerUpdateStreaming, Error> {
+    ) -> Result<ContractUpdateStreaming, Error> {
         let mut grpc_client = self.inner.clone();
         let stream = grpc_client
-            .subscribe_indexer(contract_address.unwrap_or_default())
+            .subscribe_contracts(ContractQuery {
+                contract_addresses: contract_address.map(|c| vec![c]).unwrap_or_default(),
+                contract_types: vec![],
+            })
             .await?;
         Ok(stream)
     }

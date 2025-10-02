@@ -199,24 +199,31 @@ impl From<Token> for torii_proto::Token {
 
 #[derive(FromRow, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct TokenCollection {
+pub struct TokenContract {
     pub contract_address: String,
+    pub contract_type: String,
     pub name: String,
     pub symbol: String,
     pub decimals: u8,
-    pub count: u32,
     pub metadata: String,
+    pub total_supply: Option<String>,
 }
 
-impl From<TokenCollection> for torii_proto::TokenCollection {
-    fn from(value: TokenCollection) -> Self {
+impl From<TokenContract> for torii_proto::TokenContract {
+    fn from(value: TokenContract) -> Self {
         Self {
             contract_address: Felt::from_str(&value.contract_address).unwrap(),
+            r#type: value
+                .contract_type
+                .parse()
+                .unwrap_or(torii_proto::ContractType::OTHER),
             name: value.name,
             symbol: value.symbol,
             decimals: value.decimals,
-            count: value.count,
             metadata: value.metadata,
+            total_supply: value
+                .total_supply
+                .map(|s| U256::from_be_hex(s.trim_start_matches("0x"))),
         }
     }
 }
@@ -248,26 +255,37 @@ impl From<TokenBalance> for torii_proto::TokenBalance {
     }
 }
 
-#[derive(FromRow, Deserialize, Debug, Clone, Default)]
+#[derive(FromRow, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct ContractCursor {
-    pub head: Option<i64>,
-    pub tps: Option<i64>,
-    pub last_block_timestamp: Option<i64>,
+pub struct TokenTransfer {
+    pub id: String,
     pub contract_address: String,
-    pub last_pending_block_tx: Option<String>,
+    pub from_address: String,
+    pub to_address: String,
+    pub amount: String,
+    pub token_id: String,
+    pub executed_at: DateTime<Utc>,
+    pub event_id: Option<String>,
 }
 
-impl From<ContractCursor> for torii_proto::ContractCursor {
-    fn from(value: ContractCursor) -> Self {
+impl From<TokenTransfer> for torii_proto::TokenTransfer {
+    fn from(value: TokenTransfer) -> Self {
+        let token_id_opt = value
+            .token_id
+            .split(':')
+            .collect::<Vec<&str>>()
+            .get(1)
+            .map(|tid| U256::from_be_hex(tid.trim_start_matches("0x")));
+
         Self {
+            id: value.id,
             contract_address: Felt::from_str(&value.contract_address).unwrap(),
-            head: value.head.map(|h| h as u64),
-            tps: value.tps.map(|t| t as u64),
-            last_block_timestamp: value.last_block_timestamp.map(|t| t as u64),
-            last_pending_block_tx: value
-                .last_pending_block_tx
-                .map(|tx| Felt::from_str(&tx).unwrap()),
+            from_address: Felt::from_str(&value.from_address).unwrap(),
+            to_address: Felt::from_str(&value.to_address).unwrap(),
+            amount: U256::from_be_hex(value.amount.trim_start_matches("0x")),
+            token_id: token_id_opt,
+            executed_at: value.executed_at,
+            event_id: value.event_id,
         }
     }
 }
@@ -356,6 +374,40 @@ impl From<Controller> for torii_proto::Controller {
             address: Felt::from_str(&value.address).unwrap(),
             username: value.username,
             deployed_at: value.deployed_at,
+        }
+    }
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Contract {
+    pub id: String,
+    pub contract_address: String,
+    pub contract_type: String,
+    pub head: Option<i64>,
+    pub tps: Option<i64>,
+    pub last_block_timestamp: Option<i64>,
+    pub last_pending_block_tx: Option<String>,
+    pub updated_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<Contract> for torii_proto::Contract {
+    fn from(value: Contract) -> Self {
+        let contract_type = torii_proto::ContractType::from_str(&value.contract_type)
+            .unwrap_or(torii_proto::ContractType::OTHER);
+
+        Self {
+            contract_address: Felt::from_str(&value.contract_address).unwrap(),
+            contract_type,
+            head: value.head.map(|h| h as u64),
+            tps: value.tps.map(|t| t as u64),
+            last_block_timestamp: value.last_block_timestamp.map(|t| t as u64),
+            last_pending_block_tx: value
+                .last_pending_block_tx
+                .map(|tx| Felt::from_str(&tx).unwrap()),
+            updated_at: value.updated_at,
+            created_at: value.created_at,
         }
     }
 }

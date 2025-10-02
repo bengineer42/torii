@@ -22,7 +22,7 @@ use torii_messaging::{Messaging, MessagingConfig};
 use torii_proto::proto::world::PublishMessageRequest;
 use torii_sqlite::executor::Executor;
 use torii_sqlite::Sql;
-use torii_storage::proto::{Contract, ContractType};
+use torii_storage::proto::{ContractDefinition, ContractType};
 use torii_storage::Storage;
 use torii_typed_data::typed_data::{Domain, Field, SimpleField, TypedData};
 
@@ -62,9 +62,10 @@ async fn test_publish_message(sequencer: &RunnerCtx) {
         Sql::new(
             pool.clone(),
             sender,
-            &[Contract {
+            &[ContractDefinition {
                 address: Felt::ZERO,
                 r#type: ContractType::WORLD,
+                starting_block: None,
             }],
         )
         .await
@@ -317,9 +318,10 @@ async fn test_cross_messaging_between_relay_servers(sequencer: &RunnerCtx) {
         Sql::new(
             pool1.clone(),
             sender1,
-            &[Contract {
+            &[ContractDefinition {
                 address: Felt::ZERO,
                 r#type: ContractType::WORLD,
+                starting_block: None,
             }],
         )
         .await
@@ -340,9 +342,10 @@ async fn test_cross_messaging_between_relay_servers(sequencer: &RunnerCtx) {
         Sql::new(
             pool2.clone(),
             sender2,
-            &[Contract {
+            &[ContractDefinition {
                 address: Felt::ZERO,
                 r#type: ContractType::WORLD,
+                starting_block: None,
             }],
         )
         .await
@@ -574,9 +577,10 @@ async fn test_publish_message_with_bad_signature_fails(sequencer: &RunnerCtx) {
         Sql::new(
             pool.clone(),
             sender,
-            &[Contract {
+            &[ContractDefinition {
                 address: Felt::ZERO,
                 r#type: ContractType::WORLD,
+                starting_block: None,
             }],
         )
         .await
@@ -759,9 +763,10 @@ async fn test_timestamp_validation_logic(sequencer: &RunnerCtx) {
         Sql::new(
             pool.clone(),
             sender,
-            &[Contract {
+            &[ContractDefinition {
                 address: Felt::ZERO,
                 r#type: ContractType::WORLD,
+                starting_block: None,
             }],
         )
         .await

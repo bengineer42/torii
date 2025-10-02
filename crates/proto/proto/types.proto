@@ -149,15 +149,6 @@ message Token {
     optional bytes total_supply = 7;
 }
 
-message TokenCollection {
-    bytes contract_address = 2;
-    string name = 3;
-    string symbol = 4;
-    uint32 decimals = 5;
-    uint32 count = 6;
-    bytes metadata = 7;
-}
-
 message TokenBalance {
     bytes balance = 1;
     bytes account_address = 2;
@@ -219,6 +210,48 @@ message TokenBalanceQuery {
     // The list of token contract addresses to retrieve balances for
     repeated bytes contract_addresses = 2;
     // The list of token IDs to retrieve balances for
+    repeated bytes token_ids = 3;
+    // Pagination
+    Pagination pagination = 4;
+}
+
+// A request to retrieve token contracts
+message TokenContractQuery {
+    // The list of contract addresses to retrieve token contracts for
+    repeated bytes contract_addresses = 1;
+    // The list of contract types to filter by
+    repeated ContractType contract_types = 2;
+    // Pagination
+    Pagination pagination = 3;
+}
+
+// A token transfer record
+message TokenTransfer {
+    // Unique identifier for the transfer (event_id:token_id key)
+    string id = 1;
+    // Contract address of the token
+    bytes contract_address = 2;
+    // Sender address
+    bytes from_address = 3;
+    // Recipient address
+    bytes to_address = 4;
+    // Amount transferred (big-endian bytes)
+    bytes amount = 5;
+    // Token ID when applicable (ERC721/1155); omitted for ERC20
+    optional bytes token_id = 6;
+    // Executed at timestamp (seconds since epoch)
+    uint64 executed_at = 7;
+    // Optional event id that originated this transfer
+    optional string event_id = 8;
+}
+
+// A request to retrieve token transfers
+message TokenTransferQuery {
+    // Filter by any of these account addresses (as sender or recipient)
+    repeated bytes account_addresses = 1;
+    // Filter by token contract addresses
+    repeated bytes contract_addresses = 2;
+    // Filter by token IDs (bytes of numeric id)
     repeated bytes token_ids = 3;
     // Pagination
     Pagination pagination = 4;
@@ -288,4 +321,57 @@ message TransactionQuery {
     TransactionFilter filter = 1;
     // Pagination
     Pagination pagination = 2;
+}
+
+enum ContractType {
+    WORLD = 0;
+    ERC20 = 1;
+    ERC721 = 2;
+    ERC1155 = 3;
+    UDC = 4;
+    OTHER = 5;
+}
+
+message Contract {
+    // The contract address
+    bytes contract_address = 1;
+    // The type of contract
+    ContractType contract_type = 2;
+    // Current block height
+    optional uint64 head = 3;
+    // Transactions per second
+    optional uint64 tps = 4;
+    // Last block timestamp
+    optional uint64 last_block_timestamp = 5;
+    // Last pending block transaction
+    optional bytes last_pending_block_tx = 6;
+    // When the contract was last updated
+    uint64 updated_at = 7;
+    // When the contract was first tracked
+    uint64 created_at = 8;
+}
+
+// A request to retrieve contracts
+message ContractQuery {
+    // The list of contract addresses to retrieve
+    repeated bytes contract_addresses = 1;
+    // The list of contract types to filter by
+    repeated ContractType contract_types = 2;
+}
+
+message TokenContract {
+    // The contract address
+    bytes contract_address = 1;
+    // The type of contract
+    ContractType contract_type = 2;
+    // The name of the contract
+    string name = 3;
+    // The symbol of the contract
+    string symbol = 4;
+    // The decimals of the contract
+    uint32 decimals = 5;
+    // The metadata of the contract
+    bytes metadata = 6;
+    // The total supply of the contract
+    optional bytes total_supply = 7;
 }
