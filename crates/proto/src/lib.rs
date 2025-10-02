@@ -86,7 +86,7 @@ impl FromStr for ContractType {
     type Err = ProtoError;
 
     fn from_str(input: &str) -> Result<Self, Self::Err> {
-        match input.to_lowercase().as_str() {
+        match input.to_lowercase().trim_end_matches("token") {
             "world" => Ok(ContractType::WORLD),
             "erc20" => Ok(ContractType::ERC20),
             "erc721" => Ok(ContractType::ERC721),
@@ -344,7 +344,9 @@ pub struct TokenContract {
     pub symbol: String,
     pub decimals: u8,
     pub metadata: String,
+    pub token_metadata: String,
     pub total_supply: Option<U256>,
+    pub traits: String,
 }
 
 impl From<TokenContract> for proto::types::TokenContract {
@@ -357,6 +359,8 @@ impl From<TokenContract> for proto::types::TokenContract {
             decimals: value.decimals as u32,
             metadata: value.metadata.into_bytes(),
             total_supply: value.total_supply.map(|s| s.to_be_bytes().to_vec()),
+            traits: value.traits,
+            token_metadata: value.token_metadata.into_bytes(),
         }
     }
 }
@@ -372,6 +376,9 @@ impl TryFrom<proto::types::TokenContract> for TokenContract {
             decimals: value.decimals as u8,
             metadata: String::from_utf8(value.metadata).map_err(ProtoError::FromUtf8)?,
             total_supply: value.total_supply.map(|s| U256::from_be_slice(&s)),
+            traits: value.traits,
+            token_metadata: String::from_utf8(value.token_metadata)
+                .map_err(ProtoError::FromUtf8)?,
         })
     }
 }
@@ -542,10 +549,35 @@ impl TryFrom<proto::types::ControllerQuery> for ControllerQuery {
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
+pub struct TokenAttributeFilter {
+    pub trait_name: String,
+    pub trait_value: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
 pub struct TokenQuery {
     pub contract_addresses: Vec<Felt>,
     pub token_ids: Vec<U256>,
+    pub attribute_filters: Vec<TokenAttributeFilter>,
     pub pagination: Pagination,
+}
+
+impl From<TokenAttributeFilter> for proto::types::TokenAttributeFilter {
+    fn from(value: TokenAttributeFilter) -> Self {
+        Self {
+            trait_name: value.trait_name,
+            trait_value: value.trait_value,
+        }
+    }
+}
+
+impl From<proto::types::TokenAttributeFilter> for TokenAttributeFilter {
+    fn from(value: proto::types::TokenAttributeFilter) -> Self {
+        Self {
+            trait_name: value.trait_name.clone(),
+            trait_value: value.trait_value.clone(),
+        }
+    }
 }
 
 impl From<TokenQuery> for proto::types::TokenQuery {
@@ -560,6 +592,11 @@ impl From<TokenQuery> for proto::types::TokenQuery {
                 .token_ids
                 .into_iter()
                 .map(|id| id.to_be_bytes().to_vec())
+                .collect(),
+            attribute_filters: value
+                .attribute_filters
+                .into_iter()
+                .map(|f| f.into())
                 .collect(),
             pagination: Some(value.pagination.into()),
         }
@@ -579,6 +616,11 @@ impl TryFrom<proto::types::TokenQuery> for TokenQuery {
                 .token_ids
                 .into_iter()
                 .map(|id| U256::from_be_slice(&id))
+                .collect(),
+            attribute_filters: value
+                .attribute_filters
+                .into_iter()
+                .map(|f| f.into())
                 .collect(),
             pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
         })

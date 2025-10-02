@@ -90,6 +90,12 @@ impl ReadOnlyStorage for Sql {
             layout,
             use_legacy_store: model.legacy_store,
         };
+
+        // Update cache to prevent repeated cache misses
+        if let Some(cache) = &self.cache {
+            cache.register_model(selector, model_metadata.clone()).await;
+        }
+
         Ok(model_metadata)
     }
 
@@ -143,6 +149,13 @@ impl ReadOnlyStorage for Sql {
             };
 
             models_metadata.push(model_metadata);
+        }
+
+        // Update cache to prevent repeated cache misses
+        if let Some(cache) = &self.cache {
+            for model in &models_metadata {
+                cache.register_model(model.selector, model.clone()).await;
+            }
         }
 
         Ok(models_metadata)
@@ -250,13 +263,18 @@ impl ReadOnlyStorage for Sql {
     async fn tokens(&self, query: &TokenQuery) -> Result<Page<Token>, StorageError> {
         let executor = PaginationExecutor::new(self.pool.clone());
         let mut query_builder = QueryBuilder::new("tokens")
-            .select(&["*".to_string()])
-            .where_clause("token_id != '' AND token_id IS NOT NULL");
+            .alias("t")
+            .select(&["t.*".to_string()]);
+
+        let mut join_conditions = Vec::new();
+        let mut where_conditions = Vec::new();
+
+        // Always filter for NFTs only
+        where_conditions.push("t.token_id != '' AND t.token_id IS NOT NULL".to_string());
 
         if !query.contract_addresses.is_empty() {
             let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
-            query_builder =
-                query_builder.where_clause(&format!("contract_address IN ({})", placeholders));
+            where_conditions.push(format!("t.contract_address IN ({})", placeholders));
             for addr in &query.contract_addresses {
                 query_builder = query_builder.bind_value(format!("{:#x}", addr));
             }
@@ -264,11 +282,36 @@ impl ReadOnlyStorage for Sql {
 
         if !query.token_ids.is_empty() {
             let placeholders = vec!["?"; query.token_ids.len()].join(", ");
-            query_builder = query_builder.where_clause(&format!("token_id IN ({})", placeholders));
+            where_conditions.push(format!("t.token_id IN ({})", placeholders));
             for token_id in &query.token_ids {
                 query_builder =
                     query_builder.bind_value(u256_to_sql_string(&U256::from(*token_id)));
             }
+        }
+
+        // Add attribute filters
+        for (i, filter) in query.attribute_filters.iter().enumerate() {
+            let alias = format!("ta{}", i);
+            join_conditions.push(format!(
+                "JOIN token_attributes {} ON t.id = {}.token_id",
+                alias, alias
+            ));
+
+            // Simple equality matching for trait name and value
+            let condition = format!("{}.trait_name = ? AND {}.trait_value = ?", alias, alias);
+            where_conditions.push(condition);
+            query_builder = query_builder.bind_value(filter.trait_name.clone());
+            query_builder = query_builder.bind_value(filter.trait_value.clone());
+        }
+
+        // Add joins
+        for join in join_conditions {
+            query_builder = query_builder.join(&join);
+        }
+
+        // Add where conditions
+        if !where_conditions.is_empty() {
+            query_builder = query_builder.where_clause(&where_conditions.join(" AND ").to_string());
         }
 
         let page = executor
@@ -373,6 +416,17 @@ impl ReadOnlyStorage for Sql {
                 "t.decimals as decimals".to_string(),
                 "t.metadata as metadata".to_string(),
                 "t.total_supply as total_supply".to_string(),
+                "t.traits as traits".to_string(),
+                "COALESCE((
+                    SELECT metadata 
+                    FROM tokens tk 
+                    WHERE tk.contract_address = t.contract_address 
+                    AND tk.token_id != '' 
+                    AND tk.token_id IS NOT NULL
+                    ORDER BY tk.token_id 
+                    LIMIT 1
+                ), '') as token_metadata"
+                    .to_string(),
             ])
             .join("JOIN contracts c ON c.contract_address = t.contract_address")
             .where_clause("t.token_id = '' OR t.token_id IS NULL");
@@ -805,9 +859,9 @@ impl Storage for Sql {
             }),
         );
 
-        self.executor
-            .send(query)
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+        self.executor.send(query).map_err(|e| {
+            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+        })?;
 
         recv.await
             .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::RecvError(e))))?
@@ -868,7 +922,9 @@ impl Storage for Sql {
                 arguments,
                 QueryType::RegisterModel,
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         self.build_model_query(
             vec![namespaced_name.clone()],
@@ -886,11 +942,43 @@ impl Storage for Sql {
                             vec![Argument::FieldElement(selector)],
                         ))
                         .map_err(|e| {
-                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e)))
+                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
+                                e,
+                            ))))
                         })?;
                 }
             }
         }
+
+        Ok(())
+    }
+
+    /// Registers a contract with the storage.
+    /// This is used when a new contract is registered in the world.
+    async fn register_contract(
+        &self,
+        address: Felt,
+        contract_type: torii_proto::ContractType,
+        head: u64,
+    ) -> Result<(), StorageError> {
+        let insert_contract = "INSERT INTO contracts (id, contract_address, contract_type, head, updated_at, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ON CONFLICT(id) DO UPDATE SET contract_type=EXCLUDED.contract_type, head=EXCLUDED.head, updated_at=CURRENT_TIMESTAMP RETURNING *";
+
+        let arguments = vec![
+            Argument::FieldElement(address),
+            Argument::FieldElement(address),
+            Argument::String(contract_type.to_string()),
+            Argument::Int(head as i64),
+        ];
+
+        self.executor
+            .send(QueryMessage::new(
+                insert_contract.to_string(),
+                arguments,
+                QueryType::RegisterContract,
+            ))
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -949,7 +1037,9 @@ impl Storage for Sql {
                     is_historical: self.config.is_historical(&model_selector),
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         self.executor.send(QueryMessage::other(
             "INSERT INTO entity_model (entity_id, model_id) VALUES (?, ?) ON CONFLICT(entity_id, \
@@ -959,7 +1049,7 @@ impl Storage for Sql {
                 Argument::String(entity_id.clone()),
                 Argument::String(model_id.clone()),
             ],
-        )).map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+        )).map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e)))))?;
 
         self.set_entity_model(
             &namespaced_name,
@@ -978,7 +1068,9 @@ impl Storage for Sql {
                             vec![Argument::String(entity_id.clone())],
                         ))
                         .map_err(|e| {
-                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e)))
+                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
+                                e,
+                            ))))
                         })?;
                 }
             }
@@ -995,17 +1087,8 @@ impl Storage for Sql {
         entity: Ty,
         event_id: &str,
         block_timestamp: u64,
+        keys: Vec<Felt>,
     ) -> Result<(), StorageError> {
-        let keys = if let Ty::Struct(s) = &entity {
-            let mut keys = Vec::new();
-            for m in s.keys() {
-                keys.extend(m.serialize()?);
-            }
-            keys
-        } else {
-            return Err(Box::new(Error::Parse(ParseError::InvalidTyEntity)));
-        };
-
         let namespaced_name = entity.name();
         let (model_namespace, model_name) = namespaced_name.split_once('-').unwrap();
 
@@ -1039,7 +1122,9 @@ impl Storage for Sql {
                     is_historical: self.config.is_historical(&model_selector),
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         self.set_entity_model(
             &namespaced_name,
@@ -1058,7 +1143,9 @@ impl Storage for Sql {
                             vec![Argument::String(entity_id.clone())],
                         ))
                         .map_err(|e| {
-                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e)))
+                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
+                                e,
+                            ))))
                         })?;
                 }
             }
@@ -1094,7 +1181,9 @@ impl Storage for Sql {
                     ty: entity.clone(),
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         for hook in self.config.hooks.iter() {
             if let HookEvent::ModelDeleted { model_tag } = &hook.event {
@@ -1105,7 +1194,9 @@ impl Storage for Sql {
                             vec![Argument::String(entity_id.clone())],
                         ))
                         .map_err(|e| {
-                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e)))
+                            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
+                                e,
+                            ))))
                         })?;
                 }
             }
@@ -1135,7 +1226,9 @@ impl Storage for Sql {
                     .to_string(),
                 vec![resource, uri, executed_at],
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1171,7 +1264,9 @@ impl Storage for Sql {
 
         self.executor
             .send(QueryMessage::other(statement, arguments))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1220,7 +1315,7 @@ impl Storage for Sql {
                     unique_models: unique_models.clone(),
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e)))))?;
 
         Ok(())
     }
@@ -1247,7 +1342,9 @@ impl Storage for Sql {
                 vec![id, keys, data, hash, executed_at],
                 QueryType::StoreEvent,
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1280,7 +1377,9 @@ impl Storage for Sql {
                 insert_controller.to_string(),
                 arguments,
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1306,7 +1405,9 @@ impl Storage for Sql {
                     metadata,
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
         Ok(())
     }
 
@@ -1327,7 +1428,9 @@ impl Storage for Sql {
                     metadata,
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1349,7 +1452,9 @@ impl Storage for Sql {
                     metadata,
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1397,7 +1502,9 @@ impl Storage for Sql {
                 ],
                 QueryType::StoreTokenTransfer,
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
 
         Ok(())
     }
@@ -1419,16 +1526,18 @@ impl Storage for Sql {
                     cursors,
                 }),
             ))
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+            .map_err(|e| {
+                Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+            })?;
         Ok(())
     }
 
     /// Executes pending operations and commits the current transaction.
     async fn execute(&self) -> Result<(), StorageError> {
         let (execute, recv) = QueryMessage::execute_recv();
-        self.executor
-            .send(execute)
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+        self.executor.send(execute).map_err(|e| {
+            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+        })?;
         let res = recv
             .await
             .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::RecvError(e))))?;
@@ -1439,9 +1548,9 @@ impl Storage for Sql {
     /// Rolls back the current transaction and starts a new one.
     async fn rollback(&self) -> Result<(), StorageError> {
         let (rollback, recv) = QueryMessage::rollback_recv();
-        self.executor
-            .send(rollback)
-            .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(e))))?;
+        self.executor.send(rollback).map_err(|e| {
+            Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
+        })?;
         let res = recv
             .await
             .map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::RecvError(e))))?;

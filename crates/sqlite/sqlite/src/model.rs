@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use dojo_types::naming::compute_selector_from_tag;
+use dojo_types::naming::try_compute_selector_from_tag;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::str::FromStr;
 use torii_proto::schema::Entity;
@@ -22,7 +22,7 @@ use starknet::core::types::Felt;
 
 use super::error::{self, Error};
 use crate::constants::SQL_MAX_JOINS;
-use crate::error::ParseError;
+use crate::error::{ParseError, QueryError};
 use crate::utils::build_keys_pattern;
 use crate::Sql;
 
@@ -425,7 +425,17 @@ fn map_row_to_entity(
 
     let models = schemas
         .iter()
-        .filter(|schema| model_ids.contains(&compute_selector_from_tag(&schema.name())))
+        .try_fold(Vec::new(), |mut acc, schema| {
+            let selector = try_compute_selector_from_tag(&schema.name())
+                .map_err(|_| QueryError::InvalidNamespacedModel(schema.name().to_string()))?;
+
+            if model_ids.contains(&selector) {
+                acc.push(schema);
+            }
+
+            Ok::<Vec<&dojo_types::schema::Ty>, Error>(acc)
+        })?
+        .into_iter()
         .map(|schema| {
             let mut ty = schema.clone();
             map_row_to_ty("", &schema.name(), &mut ty, row)?;
@@ -473,11 +483,13 @@ fn build_composite_clause(
             Clause::Keys(keys) => {
                 let keys_pattern = build_keys_pattern(keys);
                 bind_values.push(keys_pattern);
-                let model_selectors: Vec<String> = keys
-                    .models
-                    .iter()
-                    .map(|model| format!("{:#x}", compute_selector_from_tag(model)))
-                    .collect();
+                let model_selectors: Vec<String> =
+                    keys.models.iter().try_fold(Vec::new(), |mut acc, model| {
+                        let selector = try_compute_selector_from_tag(model)
+                            .map_err(|_| QueryError::InvalidNamespacedModel(model.to_string()))?;
+                        acc.push(format!("{:#x}", selector));
+                        Ok::<Vec<String>, Error>(acc)
+                    })?;
 
                 if model_selectors.is_empty() {
                     where_clauses.push(format!("({table}.keys REGEXP ?)"));
@@ -627,10 +639,13 @@ impl Sql {
         models: Vec<String>,
         historical: bool,
     ) -> Result<Page<Entity>, Error> {
-        let models = models
-            .iter()
-            .map(|model| compute_selector_from_tag(model))
-            .collect::<Vec<_>>();
+        let models = models.iter().try_fold(Vec::new(), |mut acc, model| {
+            let selector = try_compute_selector_from_tag(model)
+                .map_err(|_| QueryError::InvalidNamespacedModel(model.to_string()))?;
+            acc.push(selector);
+            Ok::<Vec<Felt>, Error>(acc)
+        })?;
+
         let schemas = self
             .models(&models)
             .await?
@@ -641,19 +656,17 @@ impl Sql {
         let (where_clause, bind_values) =
             build_composite_clause(table, model_relation_table, composite, historical)?;
 
-        let having_clause = models
-            .iter()
-            .map(|model| format!("INSTR(model_ids, '{:#x}') > 0", model))
-            .collect::<Vec<_>>()
-            .join(" OR ");
+        // Convert model Felts to hex strings for SQL binding
+        let model_selectors: Vec<String> =
+            models.iter().map(|model| format!("{:#x}", model)).collect();
 
         let page = if historical {
             self.fetch_historical_entities(
                 table,
                 model_relation_table,
                 &where_clause,
-                &having_clause,
                 bind_values,
+                model_selectors,
                 pagination,
             )
             .await?
@@ -669,11 +682,7 @@ impl Sql {
                     } else {
                         Some(&where_clause)
                     },
-                    if having_clause.is_empty() {
-                        None
-                    } else {
-                        Some(&having_clause)
-                    },
+                    None, // No HAVING needed - filtered by WHERE
                     pagination,
                     bind_values,
                 )
@@ -696,8 +705,8 @@ impl Sql {
         table: &str,
         model_relation_table: &str,
         where_clause: &str,
-        having_clause: &str,
         bind_values: Vec<String>,
+        model_selectors: Vec<String>,
         pagination: Pagination,
     ) -> Result<Page<torii_proto::schema::Entity>, Error> {
         use crate::query::{PaginationExecutor, QueryBuilder};
@@ -722,19 +731,29 @@ impl Sql {
             ))
             .group_by(&format!("{}.event_id", table));
 
-        // Add where clause if provided
+        if !model_selectors.is_empty() {
+            let placeholders = model_selectors
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(", ");
+            let model_filter = format!("{}.model_id IN ({})", table, placeholders);
+            query_builder = query_builder.where_clause(&model_filter);
+
+            // Add model selector bind values
+            for selector in &model_selectors {
+                query_builder = query_builder.bind_value(selector.clone());
+            }
+        }
+
+        // Add user where clause if provided (applies to already-filtered set)
         if !where_clause.is_empty() {
             query_builder = query_builder.where_clause(where_clause);
         }
 
-        // Add bind values
+        // Add user bind values
         for value in bind_values {
             query_builder = query_builder.bind_value(value);
-        }
-
-        // Add having clause if provided
-        if !having_clause.is_empty() {
-            query_builder = query_builder.having(having_clause);
         }
 
         // Execute paginated query
@@ -862,8 +881,21 @@ impl Sql {
         let mut has_more_pages = false;
         let executor = PaginationExecutor::new(self.pool.clone());
 
+        // Compute model selectors for filtering
+        let model_selectors: Vec<String> = schemas
+            .iter()
+            .filter_map(|schema| {
+                try_compute_selector_from_tag(&schema.name())
+                    .ok()
+                    .map(|selector| format!("{:#x}", selector))
+            })
+            .collect();
+
         for chunk in schemas.chunks(SQL_MAX_JOINS) {
-            let mut query_builder = QueryBuilder::new(table_name);
+            // Strategy: Start from model_relation_table and use index hints for optimal performance
+            // The composite index (model_id, entity_id) dramatically reduces the scan size
+            // when filtering by model_id on a large entity set
+            let mut query_builder = QueryBuilder::new(model_relation_table);
 
             // Build selections
             let mut selections = vec![
@@ -879,6 +911,11 @@ impl Sql {
                 ),
             ];
 
+            // Join to entities table - SQLite will use idx_entities_event_id_id for ordering
+            query_builder = query_builder.join(&format!(
+                "JOIN {table_name} ON {model_relation_table}.entity_id = {table_name}.id",
+            ));
+
             // Add schema joins and collect columns
             for model in chunk {
                 let model_table = model.name();
@@ -890,18 +927,33 @@ impl Sql {
             }
 
             query_builder = query_builder
-                .join(&format!(
-                    "JOIN {model_relation_table} ON {table_name}.id = {model_relation_table}.entity_id",
-                ))
                 .select(&selections)
                 .group_by(&format!("{}.id", table_name));
 
-            // Add where clause
-            if let Some(where_clause) = where_clause {
-                query_builder = query_builder.where_clause(where_clause);
+            if !model_selectors.is_empty() {
+                let placeholders = model_selectors
+                    .iter()
+                    .map(|_| "?")
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let model_filter =
+                    format!("{}.model_id IN ({})", model_relation_table, placeholders);
+
+                query_builder = query_builder.where_clause(&model_filter);
+
+                // Add model selector bind values
+                for selector in &model_selectors {
+                    query_builder = query_builder.bind_value(selector.clone());
+                }
             }
 
-            // Add bind values
+            // Add user where clause
+            if let Some(where_clause) = where_clause {
+                // Combine with existing where clause using AND
+                query_builder = query_builder.where_clause(&format!("({})", where_clause));
+            }
+
+            // Add user bind values
             for value in bind_values.iter() {
                 query_builder = query_builder.bind_value(value.clone());
             }

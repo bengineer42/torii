@@ -1,12 +1,17 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cainome::cairo_serde::{ByteArray, CairoSerde};
 use dojo_types::schema::{Struct, Ty};
-use erc::UpdateTokenMetadataQuery;
+use erc::{
+    store_token_attributes, update_contract_traits_from_metadata,
+    update_contract_traits_on_metadata_change, UpdateTokenMetadataQuery,
+};
 use metrics::{counter, histogram};
-use sqlx::{Executor as SqlxExecutor, FromRow, Pool, Sqlite, Transaction as SqlxTransaction};
+use serde_json;
+use sqlx::{FromRow, Pool, Sqlite, Transaction as SqlxTransaction};
 use starknet::core::types::requests::CallRequest;
 use starknet::core::types::{BlockId, BlockTag, Felt, FunctionCall, U256};
 use starknet::core::utils::parse_cairo_short_string;
@@ -31,11 +36,14 @@ use crate::executor::error::{ExecutorError, ExecutorQueryError};
 use crate::utils::{
     felt_and_u256_to_sql_string, felt_to_sql_string, felts_to_sql_string, u256_to_sql_string,
 };
+use crate::SqlConfig;
 use torii_broker::MemoryBroker;
 
+pub mod aggregator;
 pub mod erc;
 pub mod error;
 pub use erc::{RegisterNftTokenQuery, RegisterTokenContractQuery};
+use sqlx::Executor as SqlxExecutor;
 
 pub(crate) const LOG_TARGET: &str = "torii::sqlite::executor";
 
@@ -126,6 +134,7 @@ pub enum QueryType {
     RegisterNftToken(RegisterNftTokenQuery),
     RegisterTokenContract(RegisterTokenContractQuery),
     RegisterModel,
+    RegisterContract,
     StoreEvent,
     StoreTokenTransfer,
     UpdateTokenMetadata(UpdateTokenMetadataQuery),
@@ -149,6 +158,7 @@ impl std::fmt::Display for QueryType {
                 QueryType::RegisterNftToken(_) => "RegisterNftToken",
                 QueryType::RegisterTokenContract(_) => "RegisterTokenContract",
                 QueryType::RegisterModel => "RegisterModel",
+                QueryType::RegisterContract => "RegisterContract",
                 QueryType::StoreEvent => "StoreEvent",
                 QueryType::StoreTokenTransfer => "StoreTokenTransfer",
                 QueryType::UpdateTokenMetadata(_) => "UpdateTokenMetadata",
@@ -171,6 +181,11 @@ pub struct Executor<'c, P: Provider + Sync + Send + Clone + 'static> {
     shutdown_rx: Receiver<()>,
     // It is used to make RPC calls to fetch erc contracts
     provider: P,
+    // SQL configuration
+    config: crate::SqlConfig,
+    db_path: PathBuf,
+    // Timestamp of last optimization
+    last_optimization: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -247,6 +262,23 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         shutdown_tx: Sender<()>,
         provider: P,
     ) -> Result<(Self, UnboundedSender<QueryMessage>)> {
+        Self::new_with_config(
+            pool,
+            shutdown_tx,
+            provider,
+            crate::SqlConfig::default(),
+            PathBuf::from(""),
+        )
+        .await
+    }
+
+    pub async fn new_with_config(
+        pool: Pool<Sqlite>,
+        shutdown_tx: Sender<()>,
+        provider: P,
+        config: SqlConfig,
+        db_path: PathBuf,
+    ) -> Result<(Self, UnboundedSender<QueryMessage>)> {
         let (tx, rx) = unbounded_channel();
         let transaction = pool.begin().await?;
         let publish_queue = Vec::new();
@@ -260,6 +292,9 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 rx,
                 shutdown_rx,
                 provider,
+                config,
+                db_path,
+                last_optimization: None,
             },
             tx,
         ))
@@ -323,10 +358,13 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 let mut updates = Vec::with_capacity(update_cursors.cursors.len());
 
                 for cursor in &mut contracts {
-                    let new_cursor = update_cursors
+                    let new_cursor = match update_cursors
                         .cursors
                         .get(&Felt::from_str(&cursor.contract_address).unwrap())
-                        .expect("update cursor not found");
+                    {
+                        Some(cursor) => cursor,
+                        None => continue, // Skip if no cursor found
+                    };
                     let num_transactions = update_cursors
                         .cursor_transactions
                         .get(&Felt::from_str(&cursor.contract_address).unwrap())
@@ -499,6 +537,32 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 .execute(&mut **tx)
                 .await?;
 
+                // Update aggregations if this model is part of any aggregator configuration
+                let model_tag = entity.ty.name();
+                let aggregator_configs: Vec<_> = self
+                    .config
+                    .get_aggregator_for_model(&model_tag)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+                for aggregator_config in aggregator_configs {
+                    if let Err(e) = aggregator::update_aggregation(
+                        tx,
+                        &aggregator_config,
+                        &entity.ty,
+                        &entity.model_id,
+                    )
+                    .await
+                    {
+                        error!(
+                            target: LOG_TARGET,
+                            aggregator_id = %aggregator_config.id,
+                            error = ?e,
+                            "Failed to update aggregation"
+                        );
+                    }
+                }
+
                 self.publish_optimistic_and_queue(BrokerMessage::EntityUpdate(
                     entity_updated.into(),
                 ));
@@ -555,6 +619,13 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 let model_registered = torii_sqlite_types::Model::from_row(&row)?;
                 self.publish_optimistic_and_queue(BrokerMessage::ModelRegistered(
                     model_registered.into(),
+                ));
+            }
+            QueryType::RegisterContract => {
+                let row = query.fetch_one(&mut **tx).await?;
+                let contract_registered = torii_sqlite_types::Contract::from_row(&row)?;
+                self.publish_optimistic_and_queue(BrokerMessage::ContractUpdate(
+                    contract_registered.into(),
                 ));
             }
             QueryType::EventMessage(em_query) => {
@@ -623,7 +694,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 debug!(target: LOG_TARGET, "Applying balance diff.");
                 let instant = Instant::now();
                 self.apply_balance_diff(apply_balance_diff, self.provider.clone())
-                    .await?;
+                    .await
+                    .map_err(Box::new)?;
                 debug!(target: LOG_TARGET, duration = ?instant.elapsed(), "Applied balance diff.");
             }
             QueryType::RegisterNftToken(register_nft_token) => {
@@ -728,7 +800,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                 let query = sqlx::query_as::<_, torii_sqlite_types::Token>(
                     "INSERT INTO tokens (id, contract_address, token_id, name, symbol, decimals, \
-                     metadata, total_supply) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+                     metadata, total_supply, traits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
                 )
                 .bind(felt_and_u256_to_sql_string(
                     &register_nft_token.contract_address,
@@ -740,17 +812,29 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 .bind(&symbol)
                 .bind(0)
                 .bind(&register_nft_token.metadata)
-                .bind(u256_to_sql_string(&U256::from(0u8))); // Default to 0, will be updated on mint
+                .bind(u256_to_sql_string(&U256::from(0u8))) // Default to 0, will be updated on mint
+                .bind("{}"); // Initialize traits as empty JSON object for individual tokens
 
                 let token = query.fetch_one(&mut **tx).await?;
+
+                // Store individual token attributes for fast filtering
+                store_token_attributes(&register_nft_token.metadata, &token.id, &mut *tx).await?;
+
+                // Extract traits from metadata and update the token contract's traits
+                update_contract_traits_from_metadata(
+                    &register_nft_token.metadata,
+                    &register_nft_token.contract_address,
+                    &mut *tx,
+                )
+                .await?;
 
                 info!(target: LOG_TARGET, name = %name, symbol = %symbol, contract_address = %token.contract_address, token_id = %register_nft_token.token_id, "NFT token registered.");
                 self.publish_optimistic_and_queue(BrokerMessage::TokenRegistered(token.into()));
             }
             QueryType::RegisterTokenContract(register_token_contract) => {
                 let query = sqlx::query_as::<_, torii_sqlite_types::Token>(
-                    "INSERT INTO tokens (id, contract_address, name, symbol, decimals, metadata, total_supply) VALUES (?, \
-                     ?, ?, ?, ?, ?, ?) RETURNING *",
+                    "INSERT INTO tokens (id, contract_address, name, symbol, decimals, metadata, total_supply, traits) VALUES (?, \
+                     ?, ?, ?, ?, ?, ?, ?) RETURNING *",
                 )
                 .bind(felt_to_sql_string(&register_token_contract.contract_address))
                 .bind(felt_to_sql_string(&register_token_contract.contract_address))
@@ -758,7 +842,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 .bind(&register_token_contract.symbol)
                 .bind(register_token_contract.decimals)
                 .bind(&register_token_contract.metadata)
-                .bind(u256_to_sql_string(&U256::from(0u8))); // Initialize total_supply to 0 for all contracts
+                .bind(u256_to_sql_string(&U256::from(0u8))) // Initialize total_supply to 0 for all contracts
+                .bind("{}"); // Initialize traits as empty JSON object
 
                 let token = query.fetch_one(&mut **tx).await?;
                 info!(target: LOG_TARGET, name = %register_token_contract.name, symbol = %register_token_contract.symbol, contract_address = %token.contract_address, "Registered token contract.");
@@ -784,6 +869,17 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     felt_to_sql_string(&update_metadata.contract_address)
                 };
 
+                // Get the old metadata before updating (needed for trait subtraction)
+                let old_metadata = if update_metadata.token_id.is_some() {
+                    sqlx::query_scalar::<_, String>("SELECT metadata FROM tokens WHERE id = ?")
+                        .bind(&id)
+                        .fetch_optional(&mut **tx)
+                        .await?
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
+
                 // Update metadata and timestamp in database
                 let token = sqlx::query_as::<_, torii_sqlite_types::Token>(
                     "UPDATE tokens SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING *",
@@ -792,6 +888,21 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 .bind(&id)
                 .fetch_one(&mut **tx)
                 .await?;
+
+                // If this is an individual token (has token_id), update attributes and contract's traits
+                if update_metadata.token_id.is_some() {
+                    // Update individual token attributes
+                    store_token_attributes(&update_metadata.metadata, &token.id, &mut *tx).await?;
+
+                    // Update contract's traits with proper subtraction of old traits and addition of new traits
+                    update_contract_traits_on_metadata_change(
+                        &old_metadata,
+                        &update_metadata.metadata,
+                        &update_metadata.contract_address,
+                        &mut *tx,
+                    )
+                    .await?;
+                }
 
                 info!(target: LOG_TARGET, name = %token.name, symbol = %token.symbol, contract_address = %token.contract_address, token_id = ?update_metadata.token_id, "Token metadata updated.");
                 self.publish_optimistic_and_queue(BrokerMessage::TokenRegistered(token.into()));
@@ -822,9 +933,29 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         if let Some(transaction) = self.transaction.take() {
             transaction.commit().await?;
         }
-        self.pool
-            .execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            .await?;
+
+        // Run PRAGMA optimize after committing transaction if interval has elapsed
+        // This is the optimal time since the transaction is closed and tables may have changed
+        if self.config.optimize_interval > 0 {
+            let should_optimize = match self.last_optimization {
+                None => true, // Never optimized, do it now
+                Some(last) => last.elapsed().as_secs() >= self.config.optimize_interval,
+            };
+
+            if should_optimize {
+                if let Err(e) = self.pool.execute("PRAGMA optimize").await {
+                    debug!(target: LOG_TARGET, error = ?e, "Failed to run optimization after commit");
+                } else {
+                    debug!(target: LOG_TARGET, "Ran PRAGMA optimize after commit");
+                    self.last_optimization = Some(Instant::now());
+                }
+            }
+        }
+
+        // Check WAL size and truncate if it exceeds threshold
+        if self.config.wal_truncate_size_threshold > 0 {
+            self.check_and_truncate_wal().await?;
+        }
 
         self.transaction = Some(self.pool.begin().await?);
 
@@ -843,9 +974,6 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         if let Some(transaction) = self.transaction.take() {
             transaction.rollback().await?;
         }
-        self.pool
-            .execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            .await?;
 
         self.transaction = Some(self.pool.begin().await?);
 
@@ -854,6 +982,35 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         // Record metrics
         counter!("torii_executor_transaction_operations_total", "operation" => "rollback", "status" => "success")
             .increment(1);
+
+        Ok(())
+    }
+
+    async fn check_and_truncate_wal(&mut self) -> Result<()> {
+        let wal_path = self.db_path.with_extension("db-wal");
+
+        // Check if WAL file exists and get its size
+        if let Ok(metadata) = tokio::fs::metadata(&wal_path).await {
+            let wal_size = metadata.len();
+
+            if wal_size > self.config.wal_truncate_size_threshold {
+                debug!(
+                    target: LOG_TARGET,
+                    wal_size = wal_size,
+                    threshold = self.config.wal_truncate_size_threshold,
+                    "WAL size exceeds threshold, performing TRUNCATE checkpoint"
+                );
+
+                // Perform TRUNCATE checkpoint
+                self.pool
+                    .execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    .await?;
+
+                counter!("torii_executor_wal_checkpoint_truncate_total").increment(1);
+
+                histogram!("torii_executor_wal_size_at_truncate_bytes").record(wal_size as f64);
+            }
+        }
 
         Ok(())
     }

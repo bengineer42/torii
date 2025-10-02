@@ -10,7 +10,7 @@ use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use starknet::core::types::Felt;
 use torii_proto::{ContractDefinition, ContractType};
-use torii_sqlite_types::{Hook, HookEvent, ModelIndices};
+use torii_sqlite_types::{Aggregation, AggregatorConfig, Hook, HookEvent, ModelIndices, SortOrder};
 
 pub const DEFAULT_HTTP_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
@@ -34,6 +34,10 @@ pub const DEFAULT_GRPC_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 
 pub const DEFAULT_ERC_MAX_METADATA_TASKS: usize = 100;
 pub const DEFAULT_DATABASE_WAL_AUTO_CHECKPOINT: u64 = 10000;
+/// Default WAL size threshold for TRUNCATE checkpoint (100MB in bytes)
+pub const DEFAULT_DATABASE_WAL_TRUNCATE_SIZE_THRESHOLD: u64 = 100 * 1024 * 1024;
+/// Default interval in seconds between PRAGMA optimize runs after commits (1 hour)
+pub const DEFAULT_DATABASE_OPTIMIZE_INTERVAL: u64 = 3600;
 pub const DEFAULT_DATABASE_BUSY_TIMEOUT: u64 = 60_000;
 pub const DEFAULT_DATABASE_ACQUIRE_TIMEOUT: u64 = 30_000;
 pub const DEFAULT_DATABASE_IDLE_TIMEOUT: u64 = 600_000;
@@ -224,6 +228,23 @@ pub struct IndexingOptions {
         help = "The chunk size to use for batch requests. This is used to split the requests into smaller chunks to avoid overwhelming the provider and potentially running into issues."
     )]
     pub batch_chunk_size: usize,
+
+    /// Whether or not to index external contract registration events.
+    #[arg(
+        long = "indexing.external_contracts",
+        default_value_t = true,
+        help = "Whether or not to index external contract registration events."
+    )]
+    pub external_contracts: bool,
+
+    /// Comma separated list of external contract instance names to index.
+    /// If empty, all external contracts will be indexed (when external_contracts is enabled).
+    #[arg(
+        long = "indexing.external_contract_whitelist",
+        value_delimiter = ',',
+        help = "Comma separated list of external contract instance names to index. If empty, all external contracts will be indexed (when external_contracts is enabled)."
+    )]
+    pub external_contract_whitelist: Vec<String>,
 }
 
 impl Default for IndexingOptions {
@@ -242,6 +263,8 @@ impl Default for IndexingOptions {
             world_block: 0,
             controllers: false,
             strict_model_reader: false,
+            external_contracts: true,
+            external_contract_whitelist: vec![],
         }
     }
 }
@@ -419,6 +442,10 @@ pub const DEFAULT_DATABASE_PAGE_SIZE: u64 = 32_768;
 /// Negative value is used to determine number of KiB to use for cache. Currently set as 512MB, 25%
 /// of the RAM of the smallest slot instance.
 pub const DEFAULT_DATABASE_CACHE_SIZE: i64 = -500_000;
+/// Default soft memory limit in bytes (1GB)
+pub const DEFAULT_DATABASE_SOFT_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
+/// Default hard memory limit in bytes (2GB)
+pub const DEFAULT_DATABASE_HARD_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
 #[serde(default)]
@@ -487,6 +514,19 @@ pub struct SqlOptions {
     )]
     pub migrations: Option<PathBuf>,
 
+    /// Aggregator configurations
+    /// Format: "aggregator_id:model_tag:group_by:aggregation:order"
+    #[arg(
+        long = "sql.aggregators",
+        value_delimiter = ';',
+        value_parser = parse_aggregator_config,
+        help = "Aggregator configurations. Format: \"aggregator_id:model_tag:group_by:aggregation:order\". \
+                Aggregation can be: field_name (latest value), +1/count (count events), max:field (highest), min:field (lowest), sum:field (accumulate), avg:field (average). \
+                Order can be 'asc' or 'desc'. Multiple configs separated by ';'. \
+                Examples: 'top_scores:ns-Player:player:score:desc' or 'most_wins:ns-GameWon:player:+1:desc' or 'avg_score:ns-Game:player:avg:score:desc'"
+    )]
+    pub aggregators: Vec<AggregatorConfig>,
+
     /// The pages interval to autocheckpoint.
     #[arg(
         long = "sql.wal_autocheckpoint",
@@ -494,6 +534,24 @@ pub struct SqlOptions {
         help = "The pages interval to autocheckpoint."
     )]
     pub wal_autocheckpoint: u64,
+
+    /// Size threshold in bytes for WAL file before performing a TRUNCATE checkpoint.
+    /// This is checked periodically during execute operations.
+    #[arg(
+        long = "sql.wal_truncate_size_threshold",
+        default_value_t = DEFAULT_DATABASE_WAL_TRUNCATE_SIZE_THRESHOLD,
+        help = "Size threshold in bytes for WAL file before performing a TRUNCATE checkpoint. Set to 0 to disable. Default is 100MB."
+    )]
+    pub wal_truncate_size_threshold: u64,
+
+    /// Interval in seconds between PRAGMA optimize runs after transaction commits.
+    /// This intelligently updates query planner statistics for better performance.
+    #[arg(
+        long = "sql.optimize_interval",
+        default_value_t = DEFAULT_DATABASE_OPTIMIZE_INTERVAL,
+        help = "Interval in seconds between PRAGMA optimize runs after transaction commits. Set to 0 to disable automatic optimization. Default is 3600 seconds (1 hour)."
+    )]
+    pub optimize_interval: u64,
 
     /// The timeout before the database is considered busy.
     #[arg(
@@ -530,6 +588,26 @@ pub struct SqlOptions {
                 controls how many concurrent read operations can be performed."
     )]
     pub max_connections: u32,
+
+    /// Soft memory limit in bytes for SQLite operations. When exceeded, SQLite will try to free
+    /// memory by reducing cache size and other optimizations.
+    #[arg(
+        long = "sql.soft_memory_limit",
+        default_value_t = DEFAULT_DATABASE_SOFT_MEMORY_LIMIT,
+        help = "Soft memory limit in bytes for SQLite operations. When exceeded, SQLite will try \
+                to free memory by reducing cache size and other optimizations."
+    )]
+    pub soft_memory_limit: u64,
+
+    /// Hard memory limit in bytes for SQLite operations. When exceeded, SQLite will abort
+    /// operations to prevent excessive memory usage.
+    #[arg(
+        long = "sql.hard_memory_limit",
+        default_value_t = DEFAULT_DATABASE_HARD_MEMORY_LIMIT,
+        help = "Hard memory limit in bytes for SQLite operations. When exceeded, SQLite will \
+                abort operations to prevent excessive memory usage."
+    )]
+    pub hard_memory_limit: u64,
 }
 
 impl Default for SqlOptions {
@@ -541,12 +619,17 @@ impl Default for SqlOptions {
             page_size: DEFAULT_DATABASE_PAGE_SIZE,
             cache_size: DEFAULT_DATABASE_CACHE_SIZE,
             wal_autocheckpoint: DEFAULT_DATABASE_WAL_AUTO_CHECKPOINT,
+            wal_truncate_size_threshold: DEFAULT_DATABASE_WAL_TRUNCATE_SIZE_THRESHOLD,
+            optimize_interval: DEFAULT_DATABASE_OPTIMIZE_INTERVAL,
             busy_timeout: DEFAULT_DATABASE_BUSY_TIMEOUT,
             acquire_timeout: DEFAULT_DATABASE_ACQUIRE_TIMEOUT,
             idle_timeout: DEFAULT_DATABASE_IDLE_TIMEOUT,
             max_connections: DEFAULT_DATABASE_MAX_CONNECTIONS,
+            soft_memory_limit: DEFAULT_DATABASE_SOFT_MEMORY_LIMIT,
+            hard_memory_limit: DEFAULT_DATABASE_HARD_MEMORY_LIMIT,
             hooks: vec![],
             migrations: None,
+            aggregators: vec![],
         }
     }
 }
@@ -567,7 +650,7 @@ pub struct SnapshotOptions {
     pub version: Option<String>,
 }
 
-#[derive(Default, Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
+#[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
 #[serde(default)]
 #[command(next_help_heading = "Runner options")]
 pub struct RunnerOptions {
@@ -586,6 +669,48 @@ pub struct RunnerOptions {
         help = "Check if contracts are deployed before starting torii."
     )]
     pub check_contracts: bool,
+
+    /// Number of threads for the query runtime (GraphQL/gRPC API).
+    #[arg(
+        long = "runner.query_threads",
+        default_value_t = 0,
+        help = "Number of threads for the query runtime handling GraphQL and gRPC API requests. \
+                If 0, uses adaptive allocation based on CPU count and workload."
+    )]
+    pub query_threads: usize,
+
+    /// Number of threads for the indexer runtime.
+    #[arg(
+        long = "runner.indexer_threads",
+        default_value_t = 0,
+        help = "Number of threads for the indexer runtime handling block processing and event indexing. \
+                If 0, uses adaptive allocation. During heavy indexing, more threads are allocated to indexer."
+    )]
+    pub indexer_threads: usize,
+
+    /// Runtime allocation strategy for balancing indexing vs query performance.
+    #[arg(
+        long = "runner.allocation_strategy",
+        default_value = "adaptive",
+        help = "Strategy for allocating CPU resources: \
+                'adaptive' - automatically adjusts based on workload, \
+                'query_priority' - prioritizes query responsiveness, \
+                'indexer_priority' - prioritizes indexing throughput, \
+                'balanced' - equal allocation between indexer and queries"
+    )]
+    pub allocation_strategy: String,
+}
+
+impl Default for RunnerOptions {
+    fn default() -> Self {
+        Self {
+            explorer: false,
+            check_contracts: false,
+            query_threads: 0,
+            indexer_threads: 0,
+            allocation_strategy: "adaptive".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
@@ -838,4 +963,59 @@ where
     }
 
     seq.end()
+}
+
+// Parses clap cli argument which is expected to be in the format:
+// - aggregator_id:model_tag:group_by:aggregation:order
+// - aggregator_id:model_tag:group_by:aggregation_type:field_path:order (for aggregations with field)
+fn parse_aggregator_config(part: &str) -> anyhow::Result<AggregatorConfig> {
+    let parts: Vec<&str> = part.split(':').collect();
+
+    // Can be 5 parts (simple field or count) or 6 parts (aggregation:field)
+    if parts.len() != 5 && parts.len() != 6 {
+        return Err(anyhow::anyhow!(
+            "Invalid aggregator config format. Expected \
+             'aggregator_id:model_tag:group_by:aggregation:order' or \
+             'aggregator_id:model_tag:group_by:aggregation_type:field:order'"
+        ));
+    }
+
+    let (aggregation, order_idx) = if parts.len() == 5 {
+        // Simple format: aggregator_id:model_tag:group_by:aggregation:order
+        let agg = match parts[3] {
+            "+1" | "increment" | "count" => Aggregation::Count,
+            field_path => Aggregation::Latest(field_path.to_string()),
+        };
+        (agg, 4)
+    } else {
+        // Extended format: aggregator_id:model_tag:group_by:aggregation_type:field:order
+        let agg = match parts[3].to_lowercase().as_str() {
+            "max" => Aggregation::Max(parts[4].to_string()),
+            "min" => Aggregation::Min(parts[4].to_string()),
+            "sum" => Aggregation::Sum(parts[4].to_string()),
+            "avg" | "average" => Aggregation::Avg(parts[4].to_string()),
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Invalid aggregation type. Expected 'max', 'min', 'sum', or 'avg'"
+                ));
+            }
+        };
+        (agg, 5)
+    };
+
+    let order = match parts[order_idx].to_lowercase().as_str() {
+        "desc" => SortOrder::Desc,
+        "asc" => SortOrder::Asc,
+        _ => {
+            return Err(anyhow::anyhow!("Invalid order. Expected 'asc' or 'desc'"));
+        }
+    };
+
+    Ok(AggregatorConfig {
+        id: parts[0].to_string(),
+        model_tag: parts[1].to_string(),
+        group_by: parts[2].to_string(),
+        aggregation,
+        order,
+    })
 }

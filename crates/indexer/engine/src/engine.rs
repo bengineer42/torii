@@ -18,7 +18,7 @@ use torii_processors::{
     BlockProcessorContext, EventProcessorConfig, EventProcessorContext, Processors,
     TransactionProcessorContext,
 };
-use torii_storage::proto::{ContractCursor, ContractDefinition, ContractQuery, ContractType};
+use torii_storage::proto::{Contract, ContractCursor, ContractQuery, ContractType};
 use torii_storage::utils::format_event_id;
 use torii_storage::Storage;
 use tracing::{debug, error, info, trace};
@@ -60,14 +60,13 @@ pub struct Engine<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static>
     config: EngineConfig,
     shutdown_tx: Sender<()>,
     task_manager: TaskManager<P>,
-    contracts: HashMap<Felt, ContractType>,
     contract_class_cache: Arc<ContractClassCache<P>>,
     controllers: Option<Arc<ControllersSync>>,
     fetcher: Fetcher<P>,
     nft_metadata_semaphore: Arc<Semaphore>,
     // The last fetch result & cursors, in case the processing fails, but not fetching.
     // Thus we can retry the processing with the same data instead of fetching again.
-    cached_fetch: Option<Box<FetchResult>>,
+    cached_fetch: Option<(Box<FetchResult>, HashMap<Felt, ContractType>)>,
 }
 
 impl Default for EngineConfig {
@@ -97,7 +96,6 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         processors: Arc<Processors<P>>,
         config: EngineConfig,
         shutdown_tx: Sender<()>,
-        contracts: &[ContractDefinition],
     ) -> Self {
         Self::new_with_controllers(
             storage,
@@ -106,7 +104,6 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
             processors,
             config,
             shutdown_tx,
-            contracts,
             None,
         )
     }
@@ -119,13 +116,8 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         processors: Arc<Processors<P>>,
         config: EngineConfig,
         shutdown_tx: Sender<()>,
-        contracts: &[ContractDefinition],
         controllers: Option<Arc<ControllersSync>>,
     ) -> Self {
-        let contracts = contracts
-            .iter()
-            .map(|contract| (contract.address, contract.r#type))
-            .collect();
         let max_concurrent_tasks = config.max_concurrent_tasks;
         let event_processor_config = config.event_processor_config.clone();
         let fetcher_config = config.fetcher_config.clone();
@@ -139,7 +131,6 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
             processors: processors.clone(),
             config,
             shutdown_tx,
-            contracts,
             task_manager: TaskManager::new(
                 storage,
                 cache,
@@ -156,20 +147,17 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         }
     }
 
-    async fn get_cursors(&self) -> Result<HashMap<Felt, ContractCursor>, Error> {
+    async fn get_contracts(&self) -> Result<HashMap<Felt, Contract>, Error> {
         let query = ContractQuery {
             contract_addresses: vec![],
             contract_types: vec![],
         };
         let contracts = self.storage.contracts(&query).await?;
-        let cursors = contracts
+        let contracts = contracts
             .into_iter()
-            .map(|contract| {
-                let cursor: ContractCursor = contract.into();
-                (cursor.contract_address, cursor)
-            })
+            .map(|contract| (contract.contract_address, contract))
             .collect();
-        Ok(cursors)
+        Ok(contracts)
     }
 
     pub async fn start(&mut self) -> Result<(), Error> {
@@ -192,20 +180,20 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                     let controller_sync_handle = self.start_sync_controllers().await;
 
                     // Fetch data
-                    let fetch_result = if let Some(last_fetch_result) = self.cached_fetch.as_ref() {
+                    let result = if let Some(last_fetch_result) = self.cached_fetch.as_ref() {
                         Result::<_, Error>::Ok(last_fetch_result.clone())
                     } else {
-                        let cursors = self.get_cursors().await?;
-                        let fetch_result = self.fetcher.fetch(&cursors).await?;
-                        Ok(Box::new(fetch_result))
+                        let contracts = self.get_contracts().await?;
+                        let fetch_result = self.fetcher.fetch(&contracts.values().map(|contract| (contract.contract_address, ContractCursor::from(contract.clone()))).collect()).await?;
+                        Ok((Box::new(fetch_result), contracts.values().map(|contract| (contract.contract_address, contract.contract_type)).collect()))
                     };
 
-                    Result::<_, Error>::Ok((fetch_result, controller_sync_handle))
+                    Result::<_, Error>::Ok((result, controller_sync_handle))
                 } => {
                     match res {
                         Ok((fetch_result, controller_sync_handle)) => {
                             match fetch_result {
-                                Ok(fetch_result) => {
+                                Ok((fetch_result, contracts)) => {
                                     let is_from_cache = self.cached_fetch.is_some();
 
                                     if fetching_erroring_out && !is_from_cache {
@@ -217,11 +205,11 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
 
                                     // Cache the fetch result for retry only if it's newly fetched
                                     if !is_from_cache {
-                                        self.cached_fetch = Some(fetch_result.clone());
+                                        self.cached_fetch = Some((fetch_result.clone(), contracts.clone()));
                                     }
 
                                     let process_start = Instant::now();
-                                    match self.process(&fetch_result).await {
+                                    match self.process(&fetch_result, &contracts).await {
                                         Ok(_) => {
 
                                             // Only reset backoff delay after successful processing
@@ -287,16 +275,20 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         }
     }
 
-    pub async fn process(&mut self, fetch_result: &FetchResult) -> Result<(), ProcessError> {
+    pub async fn process(
+        &mut self,
+        fetch_result: &FetchResult,
+        contracts: &HashMap<Felt, ContractType>,
+    ) -> Result<(), ProcessError> {
         let FetchResult {
             range,
             preconfirmed_block,
             cursors,
         } = fetch_result;
 
-        self.process_range(range).await?;
+        self.process_range(range, contracts).await?;
         if let Some(preconfirmed_block) = preconfirmed_block {
-            self.process_pending(preconfirmed_block).await?;
+            self.process_pending(preconfirmed_block, contracts).await?;
         }
 
         // Process parallelized events
@@ -328,7 +320,11 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         Ok(())
     }
 
-    pub async fn process_range(&mut self, range: &FetchRangeResult) -> Result<(), ProcessError> {
+    pub async fn process_range(
+        &mut self,
+        range: &FetchRangeResult,
+        cursors: &HashMap<Felt, ContractType>,
+    ) -> Result<(), ProcessError> {
         let mut processed_blocks = HashSet::new();
 
         // Process all transactions in the chunk
@@ -346,6 +342,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                     *block_number,
                     block.timestamp,
                     &tx.transaction,
+                    cursors,
                 )
                 .await?;
             }
@@ -363,6 +360,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
     pub async fn process_pending(
         &mut self,
         data: &FetchPreconfirmedBlockResult,
+        cursors: &HashMap<Felt, ContractType>,
     ) -> Result<(), ProcessError> {
         for (tx_hash, tx) in &data.transactions {
             if tx.events.is_empty() {
@@ -376,6 +374,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                     data.block_number,
                     data.timestamp,
                     &tx.transaction,
+                    cursors,
                 )
                 .await
             {
@@ -396,6 +395,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         block_number: u64,
         block_timestamp: u64,
         transaction: &Option<TransactionContent>,
+        cursors: &HashMap<Felt, ContractType>,
     ) -> Result<(), ProcessError> {
         let mut unique_contracts = HashSet::new();
         let mut unique_models = HashSet::new();
@@ -410,7 +410,9 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                 event_idx as u64,
             );
 
-            let Some(&contract_type) = self.contracts.get(&event.from_address) else {
+            let contract_type = if let Some(contract_type) = cursors.get(&event.from_address) {
+                *contract_type
+            } else {
                 continue;
             };
 

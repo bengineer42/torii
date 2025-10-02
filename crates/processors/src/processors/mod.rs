@@ -15,6 +15,7 @@ use event_message::EventMessageProcessor;
 use metadata_update::MetadataUpdateProcessor;
 use raw_event::RawEventProcessor;
 use register_event::RegisterEventProcessor;
+use register_external_contract::RegisterExternalContractProcessor;
 use register_model::RegisterModelProcessor;
 use register_model_with_schema::RegisterModelWithSchemaProcessor;
 use starknet::core::types::Felt;
@@ -48,6 +49,7 @@ mod event_message;
 mod metadata_update;
 mod raw_event;
 mod register_event;
+mod register_external_contract;
 mod register_model;
 mod register_model_with_schema;
 mod store_del_record;
@@ -94,6 +96,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Processors<P
                     Box::new(RegisterModelProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(RegisterModelWithSchemaProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(RegisterEventProcessor) as Box<dyn EventProcessor<P>>,
+                    Box::new(RegisterExternalContractProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(UpgradeModelProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(UpgradeEventProcessor) as Box<dyn EventProcessor<P>>,
                     Box::new(StoreSetRecordProcessor),

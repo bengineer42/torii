@@ -455,6 +455,15 @@ pub async fn try_register_nft_token_metadata<P: Provider + Sync>(
 
     cache.mark_token_registered(id).await;
 
+    // For ERC-1155, we need to track unique token count at contract level
+    // This is called when a new token is being registered, so we increment by 1
+    // We can't distinguish ERC-721 vs ERC-1155 here, but ERC-721 will also increment by 1
+    // which is correct since each ERC-721 token has supply of 1
+    let contract_id = format!("{:#x}", contract_address);
+    cache
+        .update_balance_diff(&contract_id, Felt::ZERO, Felt::from(1u8), U256::from(1u8))
+        .await;
+
     Ok(())
 }
 
@@ -575,10 +584,19 @@ pub async fn fetch_token_uri<P: Provider + Sync>(
     let token_uri =
         match try_fetch_token_uri_sequence(provider, contract_address, token_id, block_id).await {
             Ok(Some(uri)) => uri,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 warn!(
                     contract_address = format!("{:#x}", contract_address),
                     token_id = %token_id,
+                    "Error fetching token URI, empty metadata will be used instead.",
+                );
+                return Ok("".to_string());
+            }
+            Err(e) => {
+                warn!(
+                    contract_address = format!("{:#x}", contract_address),
+                    token_id = %token_id,
+                    error = ?e,
                     "Error fetching token URI, empty metadata will be used instead.",
                 );
                 return Ok("".to_string());
@@ -628,11 +646,12 @@ pub async fn fetch_token_metadata<P: Provider + Sync>(
     match metadata {
         Ok(metadata) => serde_json::to_string(&metadata)
             .map_err(|e| TokenMetadataError::Parse(ParseError::FromJsonStr(e))),
-        Err(_) => {
+        Err(e) => {
             warn!(
                 contract_address = format!("{:#x}", contract_address),
                 token_id = %token_id,
                 token_uri = %token_uri,
+                error = ?e,
                 "Error fetching metadata, empty metadata will be used instead.",
             );
             Ok("".to_string())

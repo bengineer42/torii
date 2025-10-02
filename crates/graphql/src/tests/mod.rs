@@ -420,7 +420,6 @@ pub async fn spinup_types_test(
         }),
         EngineConfig::default(),
         shutdown_tx,
-        contracts,
     );
 
     let cursors = contracts
@@ -431,7 +430,13 @@ pub async fn spinup_types_test(
     let fetcher = Fetcher::new(Arc::new(provider.clone()), FetcherConfig::default());
 
     let data = fetcher.fetch(&cursors).await.unwrap();
-    engine.process(&data).await.unwrap();
+    engine
+        .process(
+            &data,
+            &contracts.iter().map(|c| (c.address, c.r#type)).collect(),
+        )
+        .await
+        .unwrap();
     db.execute().await.unwrap();
     Ok((pool, provider))
 }
