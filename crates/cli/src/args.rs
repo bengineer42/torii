@@ -21,18 +21,12 @@ pub struct ToriiArgs {
     pub world_address: Option<Felt>,
 
     /// The sequencer rpc endpoint to index.
-    #[arg(long, value_name = "URL", default_value = DEFAULT_RPC_URL, value_parser = parse_url)]
+    #[arg(long = "rpc", value_name = "URL", default_value = DEFAULT_RPC_URL, value_parser = parse_url)]
     pub rpc: Url,
 
-    /// Database filepath (ex: indexer.db). If specified file doesn't exist, it will be
-    /// created. Defaults to in-memory database.
-    #[arg(long)]
-    #[arg(
-        value_name = "PATH",
-        help = "Database filepath. If specified directory doesn't exist, it will be created. \
-                Defaults to in-memory database."
-    )]
-    pub db_dir: Option<PathBuf>,
+    #[command(flatten)]
+    #[merge]
+    pub database: DatabaseOptions,
 
     /// Configuration file
     #[arg(long, help = "Configuration file to setup Torii.")]
@@ -101,7 +95,7 @@ impl Default for ToriiArgs {
         Self {
             world_address: None,
             rpc: Url::parse(DEFAULT_RPC_URL).unwrap(),
-            db_dir: None,
+            database: DatabaseOptions::default(),
             config: None,
             dump_config: None,
             indexing: IndexingOptions::default(),
@@ -135,7 +129,6 @@ impl ToriiArgs {
 
         // the CLI (self) takes precedence over the config file.
         self.merge(Some(&config));
-        self.db_dir = self.db_dir.map(|dir| dir.expand_path());
 
         Ok(self)
     }
@@ -146,8 +139,8 @@ mod test {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
 
+    use torii_db_types::ModelIndices;
     use torii_proto::{ContractDefinition, ContractType};
-    use torii_sqlite_types::ModelIndices;
 
     use super::*;
 
@@ -157,7 +150,11 @@ mod test {
         let content = r#"
         world_address = "0x1234"
         rpc = "http://0.0.0.0:5050"
-        db_dir = "/tmp/torii-test"
+
+        [database]
+        host = "localhost"
+        port = 5432
+        database = "torii_test"
 
         [indexing]
         transactions = false
@@ -207,7 +204,10 @@ mod test {
             Some(Felt::from_str("0x9999").unwrap())
         );
         assert_eq!(torii_args.rpc, Url::parse("http://0.0.0.0:6060").unwrap());
-        assert_eq!(torii_args.db_dir, Some(PathBuf::from("/tmp/torii-test2")));
+        // Database connection options are now in database field with PostgreSQL test config
+        assert_eq!(torii_args.database.host, "localhost");
+        assert_eq!(torii_args.database.port, 5432);
+        assert_eq!(torii_args.database.database, "torii_test");
         assert!(torii_args.events.raw);
         assert_eq!(torii_args.sql.historical, vec!["a-A".to_string()]);
         assert_eq!(torii_args.server, ServerOptions::default());
@@ -246,7 +246,7 @@ mod test {
 
         assert_eq!(torii_args.rpc, Url::parse(DEFAULT_RPC_URL).unwrap());
 
-        assert_eq!(torii_args.db_dir, None);
+        assert_eq!(torii_args.database, DatabaseOptions::default());
 
         assert_eq!(torii_args.indexing, IndexingOptions::default());
         assert_eq!(torii_args.events, EventsOptions::default());
@@ -312,7 +312,11 @@ mod test {
         let content = r#"
         world_address = "0x1234"
         rpc = "http://0.0.0.0:2222"
-        db_dir = "/tmp/torii-test"
+
+        [database]
+        host = "localhost"
+        port = 5432
+        database = "torii_test"
 
         [events]
         raw = true
@@ -357,7 +361,10 @@ mod test {
             Some(Felt::from_str("0x1234").unwrap())
         );
         assert_eq!(torii_args.rpc, Url::parse("http://0.0.0.0:2222").unwrap());
-        assert_eq!(torii_args.db_dir, Some(PathBuf::from("/tmp/torii-test")));
+        // Database connection options are now in database field with PostgreSQL test config
+        assert_eq!(torii_args.database.host, "localhost");
+        assert_eq!(torii_args.database.port, 5432);
+        assert_eq!(torii_args.database.database, "torii_test");
         assert!(torii_args.events.raw);
         assert_eq!(
             torii_args.sql.historical,

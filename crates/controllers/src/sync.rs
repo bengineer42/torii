@@ -199,7 +199,7 @@ mod tests {
     use starknet::providers::{jsonrpc::HttpTransport, JsonRpcClient};
     use tempfile::NamedTempFile;
     use tokio::sync::broadcast;
-    use torii_sqlite::{executor::Executor, Sql};
+    use torii_db::{executor::Executor, Sql};
     use url::Url;
 
     const CARTRIDGE_NODE_MAINNET: &str = "https://api.cartridge.gg/x/starknet/mainnet";

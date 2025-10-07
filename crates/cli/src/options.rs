@@ -9,8 +9,8 @@ use merge_options::MergeOptions;
 use serde::ser::SerializeSeq;
 use serde::{Deserialize, Serialize};
 use starknet::core::types::Felt;
+use torii_db_types::{Aggregation, AggregatorConfig, Hook, HookEvent, ModelIndices, SortOrder};
 use torii_proto::{ContractDefinition, ContractType};
-use torii_sqlite_types::{Aggregation, AggregatorConfig, Hook, HookEvent, ModelIndices, SortOrder};
 
 pub const DEFAULT_HTTP_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_HTTP_PORT: u16 = 8080;
@@ -453,6 +453,92 @@ pub const DEFAULT_DATABASE_SOFT_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
 /// Default hard memory limit in bytes (2GB)
 pub const DEFAULT_DATABASE_HARD_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 
+// PostgreSQL connection defaults
+pub const DEFAULT_POSTGRES_HOST: &str = "localhost";
+pub const DEFAULT_POSTGRES_PORT: u16 = 5432;
+pub const DEFAULT_POSTGRES_DATABASE: &str = "torii";
+pub const DEFAULT_POSTGRES_USERNAME: &str = "postgres";
+
+#[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
+#[serde(default)]
+#[command(next_help_heading = "Database options")]
+pub struct DatabaseOptions {
+    /// PostgreSQL database host
+    #[arg(
+        long = "database.host",
+        default_value = DEFAULT_POSTGRES_HOST,
+        env = "POSTGRES_HOST",
+        help = "PostgreSQL database host"
+    )]
+    pub host: String,
+
+    /// PostgreSQL database port
+    #[arg(
+        long = "database.port",
+        default_value_t = DEFAULT_POSTGRES_PORT,
+        env = "POSTGRES_PORT",
+        help = "PostgreSQL database port"
+    )]
+    pub port: u16,
+
+    /// PostgreSQL database name
+    #[arg(
+        long = "database.name",
+        default_value = DEFAULT_POSTGRES_DATABASE,
+        env = "POSTGRES_DB",
+        help = "PostgreSQL database name"
+    )]
+    pub database: String,
+
+    /// PostgreSQL username
+    #[arg(
+        long = "database.username",
+        default_value = DEFAULT_POSTGRES_USERNAME,
+        env = "POSTGRES_USER",
+        help = "PostgreSQL username"
+    )]
+    pub username: String,
+
+    /// PostgreSQL password
+    #[arg(
+        long = "database.password",
+        env = "POSTGRES_PASSWORD",
+        help = "PostgreSQL password"
+    )]
+    pub password: Option<String>,
+
+    /// PostgreSQL connection URL (overrides individual connection options if provided)
+    #[arg(
+        long = "database.url",
+        env = "DATABASE_URL",
+        help = "Complete PostgreSQL connection URL (e.g., postgresql://user:pass@host:port/db)"
+    )]
+    pub url: Option<String>,
+
+    /// Enable SSL connection
+    #[arg(
+        long = "database.ssl",
+        default_value_t = false,
+        env = "POSTGRES_SSL",
+        help = "Enable SSL connection to PostgreSQL"
+    )]
+    pub ssl: bool,
+}
+
+impl Default for DatabaseOptions {
+    fn default() -> Self {
+        Self {
+            host: DEFAULT_POSTGRES_HOST.to_string(),
+            port: DEFAULT_POSTGRES_PORT,
+            database: DEFAULT_POSTGRES_DATABASE.to_string(),
+            username: DEFAULT_POSTGRES_USERNAME.to_string(),
+            password: None,
+            url: None,
+            ssl: false,
+        }
+    }
+}
+
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
 #[serde(default)]
 #[command(next_help_heading = "SQL options")]
@@ -704,14 +790,14 @@ impl Default for ActivityOptions {
 pub struct SnapshotOptions {
     /// Snapshot URL to download
     #[arg(long = "snapshot.url", help = "The snapshot URL to download.")]
-    pub url: Option<String>,
+    pub snapshot_url: Option<String>,
 
     /// Optional version of the remote snapshot torii version
     #[arg(
         long = "snapshot.version",
         help = "Optional version of the torii the snapshot has been made from. This is only used to give a warning if there is a version mismatch between the snapshot and this torii."
     )]
-    pub version: Option<String>,
+    pub snapshot_version: Option<String>,
 }
 
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]

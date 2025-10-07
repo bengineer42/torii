@@ -7,7 +7,6 @@ use tokio::sync::Semaphore;
 use torii_cache::Cache;
 use torii_proto::ContractType;
 use torii_storage::Storage;
-use torii_task_network::TaskNetwork;
 use tracing::{debug, error};
 
 use crate::error::Error;
@@ -41,7 +40,7 @@ pub struct TaskManager<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'st
     storage: Arc<dyn Storage>,
     cache: Arc<dyn Cache>,
     provider: P,
-    task_network: TaskNetwork<TaskId, TaskData>,
+    pending_tasks: LinkedHashMap<TaskId, TaskData>,
     processors: Arc<Processors<P>>,
     event_processor_config: EventProcessorConfig,
     nft_metadata_semaphore: Arc<Semaphore>,
@@ -53,14 +52,14 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> TaskManager<
         cache: Arc<dyn Cache>,
         provider: P,
         processors: Arc<Processors<P>>,
-        max_concurrent_tasks: usize,
+        _max_concurrent_tasks: usize,
         event_processor_config: EventProcessorConfig,
     ) -> Self {
         Self {
             storage,
             cache,
             provider,
-            task_network: TaskNetwork::new(max_concurrent_tasks),
+            pending_tasks: LinkedHashMap::new(),
             processors,
             nft_metadata_semaphore: Arc::new(Semaphore::new(
                 event_processor_config.max_metadata_tasks,
@@ -70,7 +69,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> TaskManager<
     }
 
     pub fn pending_tasks_count(&self) -> usize {
-        self.task_network.len()
+        self.pending_tasks.len()
     }
 
     pub fn add_parallelized_event(
@@ -84,170 +83,116 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> TaskManager<
     pub fn add_parallelized_event_with_dependencies(
         &mut self,
         task_identifier: TaskId,
-        dependencies: Vec<TaskId>,
+        _dependencies: Vec<TaskId>,
         parallelized_event: ParallelizedEvent,
     ) {
-        if let Some(task_data) = self.task_network.get_mut(&task_identifier) {
-            match parallelized_event.indexing_mode {
-                IndexingMode::Latest(event_key) => {
-                    task_data
-                        .latest_only_events
-                        .insert(event_key, parallelized_event);
-                }
-                IndexingMode::Historical => {
-                    task_data.events.push(parallelized_event);
-                }
+        let task_data = self.pending_tasks.entry(task_identifier).or_insert_with(Default::default);
+        match parallelized_event.indexing_mode {
+            IndexingMode::Latest(event_key) => {
+                task_data
+                    .latest_only_events
+                    .insert(event_key, parallelized_event);
             }
-        } else {
-            let task_data = match parallelized_event.indexing_mode {
-                IndexingMode::Latest(event_key) => TaskData {
-                    latest_only_events: LinkedHashMap::from_iter(vec![(
-                        event_key,
-                        parallelized_event.clone(),
-                    )]),
-                    ..Default::default()
-                },
-                IndexingMode::Historical => TaskData {
-                    events: vec![parallelized_event.clone()],
-                    ..Default::default()
-                },
-            };
-
-            if let Err(e) = self.task_network.add_task_with_dependencies(
-                task_identifier,
-                task_data,
-                dependencies.clone(),
-            ) {
-                error!(
-                    target: LOG_TARGET,
-                    error = ?e,
-                    task_id = %task_identifier,
-                    dependencies = ?dependencies,
-                    parallelized_event = ?parallelized_event,
-                    "Failed to add task with dependencies to network."
-                );
+            IndexingMode::Historical => {
+                task_data.events.push(parallelized_event);
             }
         }
     }
 
-    pub async fn process_tasks(&mut self) -> Result<(), Error> {
-        if self.task_network.is_empty() {
+    pub async fn process_ready_tasks(&mut self) -> Result<(), Error> {
+        if self.pending_tasks.is_empty() {
             return Ok(());
         }
 
-        let storage = self.storage.clone();
-        let processors = self.processors.clone();
-        let provider = self.provider.clone();
-        let event_processor_config = self.event_processor_config.clone();
-        let cache = self.cache.clone();
-        let nft_metadata_semaphore = self.nft_metadata_semaphore.clone();
+        debug!(target: LOG_TARGET, "Processing {} tasks", self.pending_tasks.len());
 
-        self.task_network
-            .process_tasks(move |task_id, task_data| {
-                let storage = storage.clone();
-                let processors = processors.clone();
-                let provider = provider.clone();
-                let event_processor_config = event_processor_config.clone();
-                let cache = cache.clone();
-                let nft_metadata_semaphore = nft_metadata_semaphore.clone();
+        let start = std::time::Instant::now();
 
-                async move {
-                    // Process all events for this task sequentially
-                    for ParallelizedEvent {
-                        contract_type,
-                        event,
-                        block_number,
-                        block_timestamp,
-                        event_id,
-                        ..
-                    } in task_data
-                        .events
-                        .iter()
-                        .chain(task_data.latest_only_events.values())
-                    {
-                        let contract_processors = processors.get_event_processors(*contract_type);
-                        if let Some(processors) = contract_processors.get(&event.keys[0]) {
-                            let processor = processors
-                                .iter()
-                                .find(|p| p.validate(event))
-                                .expect("Must find at least one processor for the event");
+        // Collect all tasks first to avoid borrowing issues
+        let tasks: Vec<_> = self.pending_tasks.drain().collect();
+        
+        // Process all tasks (simplified without dependency management)
+        for (_task_id, task_data) in tasks {
+            let mut all_events = task_data.events;
+            all_events.extend(task_data.latest_only_events.into_iter().map(|(_, v)| v));
+            
+            if !all_events.is_empty() {
+                self.process_events(all_events).await?;
+            }
+        }
 
-                            debug!(
-                                target: LOG_TARGET,
-                                event_name = processor.event_key(),
-                                event_id = %event_id,
-                                block_number = %block_number,
-                                task_id = %task_id,
-                                "Processing parallelized event."
-                            );
-
-                            let ctx = EventProcessorContext {
-                                storage: storage.clone(),
-                                cache: cache.clone(),
-                                provider: provider.clone(),
-                                block_number: *block_number,
-                                block_timestamp: *block_timestamp,
-                                event_id: event_id.clone(),
-                                event: event.clone(),
-                                config: event_processor_config.clone(),
-                                nft_metadata_semaphore: nft_metadata_semaphore.clone(),
-                            };
-
-                            // Record processor timing and success/error metrics
-                            let start_time = std::time::Instant::now();
-                            let processor_name = processor.event_key();
-
-                            let result = processor.process(&ctx).await;
-
-                            let duration = start_time.elapsed();
-                            histogram!(
-                                "torii_processor_duration_seconds",
-                                "processor" => processor_name.clone()
-                            )
-                            .record(duration.as_secs_f64());
-
-                            match &result {
-                                Ok(_) => {
-                                    counter!(
-                                        "torii_processor_events_processed_total",
-                                        "processor" => processor_name.clone(),
-                                        "status" => "success"
-                                    )
-                                    .increment(1);
-                                }
-                                Err(_) => {
-                                    counter!(
-                                        "torii_processor_events_processed_total",
-                                        "processor" => processor_name.clone(),
-                                        "status" => "error"
-                                    )
-                                    .increment(1);
-                                }
-                            }
-
-                            if let Err(e) = result {
-                                error!(
-                                    target: LOG_TARGET,
-                                    event_name = processor_name,
-                                    error = ?e,
-                                    task_id = %task_id,
-                                    "Processing parallelized event."
-                                );
-                                return Err(e);
-                            }
-                        }
-                    }
-
-                    Ok::<_, Error>(())
-                }
-            })
-            .await
-            .map_err(Error::TaskNetworkError)?;
+        let duration = start.elapsed();
+        histogram!("torii_indexer_task_manager_process_ready_tasks_duration_seconds")
+            .record(duration.as_secs_f64());
 
         Ok(())
     }
 
-    pub fn clear_tasks(&mut self) {
-        self.task_network.clear();
+    async fn process_events(&self, events: Vec<ParallelizedEvent>) -> Result<(), Error> {
+        let start = std::time::Instant::now();
+
+        for parallelized_event in events {
+            let context = EventProcessorContext {
+                storage: self.storage.clone(),
+                cache: self.cache.clone(),
+                provider: self.provider.clone(),
+                block_number: parallelized_event.block_number,
+                block_timestamp: parallelized_event.block_timestamp,
+                event_id: parallelized_event.event_id.clone(),
+                event: parallelized_event.event.clone(),
+                config: self.event_processor_config.clone(),
+                nft_metadata_semaphore: self.nft_metadata_semaphore.clone(),
+            };
+
+            // Get the appropriate event processors for this contract type
+            let event_processors_map = self.processors.get_event_processors(parallelized_event.contract_type);
+
+            let mut processed = false;
+            for processors_vec in event_processors_map.values() {
+                for processor in processors_vec {
+                    if processor.validate(&parallelized_event.event) {
+                        if let Err(e) = processor.process(&context).await {
+                            error!(
+                                target: LOG_TARGET,
+                                event_id = parallelized_event.event_id,
+                                processor = processor.event_key(),
+                                "Failed to process event: {}",
+                                e
+                            );
+                            counter!("torii_indexer_task_manager_events_processed_total", "status" => "failed")
+                                .increment(1);
+                        } else {
+                            counter!("torii_indexer_task_manager_events_processed_total", "status" => "success")
+                                .increment(1);
+                            processed = true;
+                        }
+                    }
+                }
+            }
+
+            if !processed {
+                // Use catch-all processor if no specific processor handled it
+                if let Err(e) = self.processors.catch_all_event.process(&context).await {
+                    error!(
+                        target: LOG_TARGET,
+                        event_id = parallelized_event.event_id,
+                        "Failed to process event with catch-all processor: {}",
+                        e
+                    );
+                    counter!("torii_indexer_task_manager_events_processed_total", "status" => "failed")
+                        .increment(1);
+                }
+            }
+        }
+
+        let duration = start.elapsed();
+        histogram!("torii_indexer_task_manager_process_events_duration_seconds")
+            .record(duration.as_secs_f64());
+
+        Ok(())
+    }
+
+    pub fn clear(&mut self) {
+        self.pending_tasks.clear();
     }
 }

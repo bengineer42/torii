@@ -8,8 +8,6 @@ pub enum Error {
     #[error(transparent)]
     StorageError(#[from] torii_storage::StorageError),
     #[error(transparent)]
-    TaskNetworkError(#[from] torii_task_network::TaskNetworkError),
-    #[error(transparent)]
     ModelError(#[from] dojo_world::contracts::model::ModelError),
     #[error(transparent)]
     PrimitiveError(#[from] dojo_types::primitive::PrimitiveError),

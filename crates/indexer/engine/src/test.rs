@@ -21,10 +21,10 @@ use starknet_crypto::poseidon_hash_many;
 use tempfile::NamedTempFile;
 use tokio::sync::broadcast;
 use torii_cache::{Cache, InMemoryCache};
-use torii_sqlite::executor::Executor;
-use torii_sqlite::types::Token;
-use torii_sqlite::utils::{felt_and_u256_to_sql_string, felt_to_sql_string, u256_to_sql_string};
-use torii_sqlite::Sql;
+use torii_db::executor::Executor;
+use torii_db::types::Token;
+use torii_db::utils::{felt_and_u256_to_sql_string, felt_to_sql_string, u256_to_sql_string};
+use torii_db::Sql;
 use torii_storage::proto::{ContractDefinition, ContractType};
 use torii_storage::Storage;
 

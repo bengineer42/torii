@@ -13,51 +13,38 @@
 use std::cmp;
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use camino::Utf8PathBuf;
-use dojo_metrics::exporters::prometheus::PrometheusRecorder;
 use dojo_types::naming::try_compute_selector_from_tag;
 use futures::future::join_all;
-use sqlx::sqlite::{
-    SqliteAutoVacuum, SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
-};
-use sqlx::Executor as SqlxExecutor;
-use sqlx::SqlitePool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+
 use starknet::core::types::{BlockId, BlockTag};
 use starknet::providers::jsonrpc::HttpTransport;
 use starknet::providers::{JsonRpcClient, Provider};
 use starknet_crypto::Felt;
-use tempfile::{NamedTempFile, TempDir};
+use tempfile::TempDir;
 use terminal_size::{terminal_size, Height, Width};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::Sender;
 use tokio_stream::StreamExt;
-use torii_broker::types::ModelUpdate;
-use torii_broker::MemoryBroker;
 use torii_cache::InMemoryCache;
 use torii_cli::ToriiArgs;
 use torii_controllers::sync::ControllersSync;
-use torii_grpc_server::GrpcConfig;
 use torii_indexer::engine::{Engine, EngineConfig};
 use torii_indexer::{FetcherConfig, FetchingFlags, IndexingFlags};
-use torii_libp2p_relay::Relay;
 use torii_messaging::{Messaging, MessagingConfig};
 use torii_processors::{EventProcessorConfig, Processors};
-use torii_server::proxy::{Proxy, ProxySettings};
-use torii_sqlite::executor::Executor;
-use torii_sqlite::{Sql, SqlConfig};
+use torii_db::executor::Executor;
+use torii_db::{Sql, SqlConfig};
 use torii_storage::proto::{ContractDefinition, ContractType};
-use torii_storage::ReadOnlyStorage;
-use tracing::{debug, error, info, info_span, warn, Instrument, Span};
+use tracing::{debug, info, info_span, warn, Instrument, Span};
 use tracing_indicatif::span_ext::IndicatifSpanExt;
-use url::form_urlencoded;
 
 mod constants;
 
@@ -306,51 +293,36 @@ impl Runner {
             }
         }
 
-        let tempfile = NamedTempFile::new()?;
-        let database_path = if let Some(db_dir) = &self.args.db_dir {
-            // Create the directory if it doesn't exist
-            std::fs::create_dir_all(db_dir)?;
-            // Set the database file path inside the directory
-            db_dir.join("torii.db")
+        // Build PostgreSQL connection URL
+        let db_url = if let Some(url) = &self.args.database.url {
+            url.clone()
         } else {
-            tempfile.path().to_path_buf()
+            let mut connection_url = format!(
+                "postgresql://{}:{}@{}:{}/{}",
+                self.args.database.username,
+                self.args.database.password.as_deref().unwrap_or(""),
+                self.args.database.host,
+                self.args.database.port,
+                self.args.database.database
+            );
+            
+            if self.args.database.ssl {
+                connection_url.push_str("?sslmode=require");
+            } else {
+                connection_url.push_str("?sslmode=prefer");
+            }
+            
+            connection_url
         };
 
-        // Download snapshot if URL is provided
-        if let Some(snapshot_url) = self.args.snapshot.url {
-            // We don't wanna download our snapshot into an existing database. So only proceed if we don't have an existing db dir
-            // or if we have a tempfile path.
-            if self.args.db_dir.is_none() || !database_path.exists() {
-                info!(target: LOG_TARGET, url = %snapshot_url, path = %database_path.display(), "Downloading snapshot...");
+        info!(target: LOG_TARGET, "Connecting to PostgreSQL database: {}@{}:{}/{}", 
+              self.args.database.username, self.args.database.host, 
+              self.args.database.port, self.args.database.database);
 
-                // Check for version mismatch
-                if let Some(snapshot_version) = self.args.snapshot.version {
-                    if snapshot_version != self.version_spec {
-                        warn!(
-                            target: LOG_TARGET,
-                            snapshot_version = %snapshot_version,
-                            current_version = %self.version_spec,
-                            "Snapshot version mismatch. This may cause issues."
-                        );
-                    }
-                }
-
-                let client = reqwest::Client::new();
-                if let Err(e) =
-                    stream_snapshot_into_file(&snapshot_url, &database_path, &client).await
-                {
-                    error!(target: LOG_TARGET, error = ?e, "Failed to download snapshot.");
-                    // Decide if we should exit or continue with a fresh DB
-                    // For now, let's exit as the user explicitly requested a snapshot.
-                    return Err(e);
-                }
-                info!(target: LOG_TARGET, "Snapshot downloaded successfully.");
-            } else {
-                error!(target: LOG_TARGET, "A database already exists at the given path. If you want to download a new snapshot, please delete the existing database file or provide a different path.");
-                return Err(anyhow::anyhow!(
-                    "Database file already exists at the specified path."
-                ));
-            }
+        // TODO: Implement snapshot download for PostgreSQL
+        // For now, snapshot functionality is disabled as it was SQLite-specific
+        if self.args.snapshot.snapshot_url.is_some() {
+            warn!(target: LOG_TARGET, "Snapshot downloads are not yet supported with PostgreSQL. Continuing with fresh database connection.");
         }
 
         // Calculate optimal runtime allocation early for database configuration
@@ -363,85 +335,42 @@ impl Runner {
             self.args.runner.indexer_threads,
         );
 
-        let mut options = SqliteConnectOptions::from_str(&database_path.to_string_lossy())?
-            .create_if_missing(true)
-            .with_regexp();
+        // Create PostgreSQL connection options
+        let mut options = PgConnectOptions::from_str(&db_url)?;
+        
+        // Set SSL mode
+        if self.args.database.ssl {
+            options = options.ssl_mode(PgSslMode::Require);
+        } else {
+            options = options.ssl_mode(PgSslMode::Prefer);
+        }
 
-        // Optimize SQLite threading for our runtime architecture
-        // Use total available threads instead of artificial 8-thread limit
-        let sqlite_threads = cmp::min(
-            cpu_count,
-            allocation.query_threads + allocation.indexer_threads,
-        );
-        options = options.pragma("threads", sqlite_threads.to_string());
+        // PostgreSQL connection settings optimized for indexing workload
+        // Note: PostgreSQL performance tuning is done via server configuration,
+        // connection-level options are more limited compared to SQLite PRAGMA settings
 
-        // Advanced performance settings optimized for indexing + query workload
-        options = options.auto_vacuum(SqliteAutoVacuum::None);
-        options = options.journal_mode(SqliteJournalMode::Wal);
-
-        // Use NORMAL for better performance during heavy indexing
-        // FULL would be safer but much slower for writes
-        options = options.synchronous(SqliteSynchronous::Normal);
-        options = options.optimize_on_close(true, None);
-
-        // Performance tuning based on workload
-        options = options.pragma("cache_size", self.args.sql.cache_size.to_string());
-        options = options.pragma("page_size", self.args.sql.page_size.to_string());
-
-        // Optimize WAL checkpointing for heavy write workloads
-        options = options.pragma(
-            "wal_autocheckpoint",
-            self.args.sql.wal_autocheckpoint.to_string(),
-        );
-
-        // Increase busy timeout for concurrent access
-        options = options.pragma("busy_timeout", self.args.sql.busy_timeout.to_string());
-
-        // Memory limits
-        options = options.pragma(
-            "soft_heap_limit",
-            self.args.sql.soft_memory_limit.to_string(),
-        );
-        options = options.pragma(
-            "hard_heap_limit",
-            self.args.sql.hard_memory_limit.to_string(),
-        );
-
-        // Additional performance optimizations for indexing workload
-        options = options.pragma("temp_store", "memory"); // Store temp tables in memory
-        options = options.pragma("mmap_size", "268435456"); // 256MB memory mapping
-        options = options.pragma("journal_size_limit", "67108864"); // 64MB journal limit
-
-        let write_pool = SqlitePoolOptions::new()
-            .min_connections(1)
-            .max_connections(1)
-            .acquire_timeout(Duration::from_millis(self.args.sql.acquire_timeout))
-            .idle_timeout(Some(Duration::from_millis(self.args.sql.idle_timeout)))
-            .connect_with(options.clone())
-            .await?;
-
-        // Aggressive WAL cleanup
-        write_pool
-            .execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            .await?;
-
-        let readonly_options = options.read_only(true);
-
-        // Use more connections for readonly pool to handle concurrent queries
-        let max_readonly_connections = cmp::max(
+        // Create a single connection pool for PostgreSQL
+        // PostgreSQL handles concurrent reads/writes better than SQLite, so we don't need separate pools
+        let max_connections = cmp::max(
             self.args.sql.max_connections,
-            (allocation.query_threads * 2) as u32, // 2 connections per query thread
+            (allocation.query_threads + allocation.indexer_threads) as u32,
         );
 
-        let readonly_pool = SqlitePoolOptions::new()
-            .min_connections(cmp::min(4, max_readonly_connections)) // Keep some connections warm
-            .max_connections(max_readonly_connections)
+        let database_pool = PgPoolOptions::new()
+            .min_connections(cmp::min(4, max_connections)) // Keep some connections warm
+            .max_connections(max_connections)
             .acquire_timeout(Duration::from_millis(self.args.sql.acquire_timeout))
             .idle_timeout(Some(Duration::from_millis(self.args.sql.idle_timeout)))
-            .connect_with(readonly_options)
+            .connect_with(options)
             .await?;
 
-        let mut migrate_handle = write_pool.acquire().await?;
+        // Test the connection
+        let mut test_conn = database_pool.acquire().await?;
+        sqlx::query("SELECT 1").fetch_one(&mut *test_conn).await?;
+        
+        info!(target: LOG_TARGET, "Successfully connected to PostgreSQL database");
+
+        let mut migrate_handle = database_pool.acquire().await?;
         if let Some(migrations) = self.args.sql.migrations {
             // Create a temporary directory to combine migrations
             let temp_migrations = TempDir::new()?;
@@ -471,10 +400,9 @@ impl Runner {
                 .await?;
         }
 
-        // Optimize database after schema changes (migrations/indexes)
-        sqlx::query("PRAGMA optimize")
-            .execute(&mut *migrate_handle)
-            .await?;
+        // PostgreSQL doesn't use PRAGMA statements like SQLite
+        // For PostgreSQL, we could run ANALYZE but it's not critical during startup
+        // sqlx::query("ANALYZE").execute(&mut *migrate_handle).await?;
 
         drop(migrate_handle);
 
@@ -548,17 +476,17 @@ impl Runner {
         };
 
         let (mut executor, sender) = Executor::new_with_config(
-            write_pool.clone(),
+            database_pool.clone(),
             shutdown_tx.clone(),
             provider.clone(),
             sql_config.clone(),
-            database_path.clone(),
+            std::path::PathBuf::new(), // PostgreSQL doesn't use db_path (SQLite-specific)
         )
         .await?;
         let executor_handle = tokio::spawn(async move { executor.run().await });
 
         let db = Sql::new_with_config(
-            readonly_pool.clone(),
+            database_pool.clone(),
             sender.clone(),
             &self.args.indexing.contracts,
             sql_config.clone(),
@@ -645,7 +573,7 @@ impl Runner {
             controllers,
         );
 
-        let shutdown_rx = shutdown_tx.subscribe();
+        let _shutdown_rx = shutdown_tx.subscribe();
         let temp_dir = TempDir::new()?;
         let artifacts_path = self
             .args
@@ -654,168 +582,27 @@ impl Runner {
             .unwrap_or_else(|| Utf8PathBuf::from(temp_dir.path().to_str().unwrap()));
 
         tokio::fs::create_dir_all(&artifacts_path).await?;
-        let absolute_path = artifacts_path.canonicalize_utf8()?;
+        let _absolute_path = artifacts_path.canonicalize_utf8()?;
 
-        // Create messaging instance with configuration
+        // Create messaging instance with default configuration (server features disabled)
         let messaging_config = MessagingConfig {
-            max_age: self.args.messaging.max_age,
-            future_tolerance: self.args.messaging.future_tolerance,
-            require_timestamp: self.args.messaging.require_timestamp,
+            max_age: 86400, // 24 hours default
+            future_tolerance: 300, // 5 minutes default
+            require_timestamp: false, // Default to false
         };
-        let messaging = Arc::new(Messaging::new(
+        let _messaging = Arc::new(Messaging::new(
             messaging_config,
             storage.clone(),
             provider.clone(),
         ));
 
-        let (mut libp2p_relay_server, cross_messaging_tx) = Relay::new_with_peers(
-            messaging.clone(),
-            self.args.relay.port,
-            self.args.relay.webrtc_port,
-            self.args.relay.websocket_port,
-            self.args.relay.local_key_path,
-            self.args.relay.cert_path,
-            self.args.relay.peers,
-        )
-        .expect("Failed to start libp2p relay server");
+        // Core indexing setup complete, starting indexing services only
+        info!(target: LOG_TARGET, "Starting Torii indexer services...");
+        info!(target: LOG_TARGET, "Server endpoints disabled - running indexer-only mode");
+        info!(target: LOG_TARGET, path = %artifacts_path, "Using ERC artifacts at path");
 
-        let grpc_bind_addr = SocketAddr::new(self.args.grpc.grpc_addr, self.args.grpc.grpc_port);
-        let (grpc_addr, grpc_server) = torii_grpc_server::new(
-            shutdown_rx,
-            storage.clone(),
-            messaging.clone(),
-            self.args.world_address.unwrap_or_default(),
-            cross_messaging_tx,
-            readonly_pool.clone(),
-            GrpcConfig {
-                subscription_buffer_size: self.args.grpc.subscription_buffer_size,
-                optimistic: self.args.grpc.optimistic,
-                tcp_keepalive_interval: Duration::from_secs(self.args.grpc.tcp_keepalive_interval),
-                http2_keepalive_interval: Duration::from_secs(
-                    self.args.grpc.http2_keepalive_interval,
-                ),
-                http2_keepalive_timeout: Duration::from_secs(
-                    self.args.grpc.http2_keepalive_timeout,
-                ),
-                max_message_size: self.args.grpc.max_message_size,
-            },
-            Some(grpc_bind_addr),
-        )
-        .await?;
-
-        let addr = SocketAddr::new(self.args.server.http_addr, self.args.server.http_port);
-
-        let mut proxy_server = Proxy::new(
-            addr,
-            self.args
-                .server
-                .http_cors_origins
-                .filter(|cors_origins| !cors_origins.is_empty()),
-            Some(grpc_addr),
-            None,
-            absolute_path.clone(),
-            Arc::new(readonly_pool.clone()),
-            storage.clone(),
-            provider.clone(),
-            self.version_spec.clone(),
-            ProxySettings {
-                tcp_keepalive_interval: self.args.grpc.tcp_keepalive_interval,
-                http2_keepalive_interval: self.args.grpc.http2_keepalive_interval,
-                http2_keepalive_timeout: self.args.grpc.http2_keepalive_timeout,
-            },
-        );
-
-        // Handle mkcert certificate generation
-        let (final_cert_path, final_key_path) = if self.args.server.mkcert {
-            if self.args.server.tls_cert_path.is_some() || self.args.server.tls_key_path.is_some() {
-                warn!(target: LOG_TARGET, "mkcert flag is set but explicit TLS paths are also provided. Using explicit paths.");
-                (
-                    self.args.server.tls_cert_path.clone(),
-                    self.args.server.tls_key_path.clone(),
-                )
-            } else {
-                match generate_mkcert_certificates().await {
-                    Ok((cert_path, key_path)) => {
-                        info!(target: LOG_TARGET, cert_path = %cert_path, key_path = %key_path, "Successfully generated mkcert certificates");
-                        (Some(cert_path), Some(key_path))
-                    }
-                    Err(e) => {
-                        warn!(target: LOG_TARGET, error = ?e, "Failed to generate mkcert certificates. Falling back to HTTP.");
-                        (None, None)
-                    }
-                }
-            }
-        } else {
-            (
-                self.args.server.tls_cert_path.clone(),
-                self.args.server.tls_key_path.clone(),
-            )
-        };
-
-        // Configure TLS if certificates are provided
-        if let (Some(cert_path), Some(key_path)) = (&final_cert_path, &final_key_path) {
-            let tls_config = torii_server::TlsConfig {
-                cert_path: cert_path.clone(),
-                key_path: key_path.clone(),
-            };
-
-            info!(target: LOG_TARGET, "Starting HTTPS server with TLS certificates");
-            proxy_server = proxy_server
-                .with_tls_config(tls_config)
-                .map_err(|e| anyhow::anyhow!("Failed to configure TLS: {}", e))?;
-        } else if final_cert_path.is_some() || final_key_path.is_some() {
-            warn!(target: LOG_TARGET, "TLS configuration incomplete. Both tls_cert_path and tls_key_path are required for HTTPS. Falling back to HTTP.");
-        }
-
-        let proxy_server = Arc::new(proxy_server);
-
-        let graphql_server = spawn_rebuilding_graphql_server(
-            shutdown_tx.clone(),
-            readonly_pool.into(),
-            proxy_server.clone(),
-            messaging.clone(),
-            storage.clone(),
-        );
-
-        let protocol = if final_cert_path.is_some() && final_key_path.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-
-        let gql_endpoint = format!("{}://{}/graphql", protocol, addr);
-        let mcp_endpoint = format!("{}://{}/mcp", protocol, addr);
-        let sql_endpoint = format!("{}://{}/sql", protocol, addr);
-
-        let encoded: String = form_urlencoded::byte_serialize(
-            gql_endpoint.replace("0.0.0.0", "localhost").as_bytes(),
-        )
-        .collect();
-        let explorer_url = format!("https://worlds.dev/torii?url={}", encoded);
-        info!(target: LOG_TARGET, endpoint = %addr, protocol = %protocol, "Starting torii endpoint.");
-        info!(target: LOG_TARGET, endpoint = %grpc_addr, "Serving gRPC endpoint.");
-        info!(target: LOG_TARGET, endpoint = %gql_endpoint, "Serving Graphql playground.");
-        info!(target: LOG_TARGET, endpoint = %sql_endpoint, "Serving SQL playground.");
-        info!(target: LOG_TARGET, endpoint = %mcp_endpoint, "Serving MCP endpoint.");
-        info!(target: LOG_TARGET, url = %explorer_url, "Serving World Explorer.");
-        info!(target: LOG_TARGET, path = %artifacts_path, "Serving ERC artifacts at path");
-
-        if self.args.runner.explorer {
-            if let Err(e) = webbrowser::open(&explorer_url) {
-                error!(target: LOG_TARGET, error = ?e, "Failed to open World Explorer in browser.");
-            }
-        }
-
-        if self.args.metrics.metrics {
-            let addr = SocketAddr::new(
-                self.args.metrics.metrics_addr,
-                self.args.metrics.metrics_port,
-            );
-            info!(target: LOG_TARGET, %addr, "Starting metrics endpoint.");
-            let prometheus_handle = PrometheusRecorder::install("torii")?;
-            let server = dojo_metrics::Server::new(prometheus_handle).with_process_metrics();
-            tokio::spawn(server.start(addr));
-        }
+        // Metrics disabled in indexer-only mode
+        // Note: Metrics functionality removed with server components
 
         // Create dedicated runtimes
         let query_runtime = create_query_runtime(allocation.query_threads);
@@ -826,16 +613,7 @@ impl Runner {
             .handle()
             .spawn(async move { engine.start().await });
 
-        let proxy_server_handle =
-            tokio::spawn(async move { proxy_server.start(shutdown_tx.subscribe()).await });
-
-        // Spawn user-facing query services on dedicated API runtime for better performance isolation
-        let graphql_server_handle = query_runtime.handle().spawn(graphql_server);
-
-        let grpc_server_handle = query_runtime.handle().spawn(grpc_server);
-
-        let libp2p_relay_server_handle =
-            tokio::spawn(async move { libp2p_relay_server.run().await });
+        info!(target: LOG_TARGET, "Core indexing services started successfully");
 
         // Macro to handle task results uniformly
         macro_rules! handle_task {
@@ -846,22 +624,12 @@ impl Runner {
                     Err(e) => Err(anyhow::anyhow!("{} task panicked: {}", $name, e)),
                 }
             };
-            // For tasks that return () directly (no inner Result)
-            ($result:expr, $name:literal, void) => {
-                $result
-                    .map_err(|e| anyhow::anyhow!("{} task panicked: {}", $name, e))
-                    .map(|_| ())
-            };
         }
 
-        // Wait for shutdown signal or any task completion
+        // Wait for shutdown signal or any core task completion
         let result = tokio::select! {
             res = engine_handle => handle_task!(res, "Engine"),
             res = executor_handle => handle_task!(res, "Executor"),
-            res = proxy_server_handle => handle_task!(res, "Proxy server"),
-            res = graphql_server_handle => handle_task!(res, "GraphQL server", void),
-            res = grpc_server_handle => handle_task!(res, "gRPC server"),
-            res = libp2p_relay_server_handle => handle_task!(res, "LibP2P relay", void),
             _ = dojo_utils::signal::wait_signals() => {
                 info!(target: LOG_TARGET, "Shutdown signal received, cleaning up...");
                 Ok(())
@@ -877,33 +645,7 @@ impl Runner {
     }
 }
 
-async fn spawn_rebuilding_graphql_server<P: Provider + Sync + Send + Clone + Debug + 'static>(
-    shutdown_tx: Sender<()>,
-    pool: Arc<SqlitePool>,
-    proxy_server: Arc<Proxy<P>>,
-    messaging: Arc<Messaging<P>>,
-    storage: Arc<dyn ReadOnlyStorage>,
-) {
-    let mut broker = MemoryBroker::<ModelUpdate>::subscribe();
 
-    loop {
-        let shutdown_rx = shutdown_tx.subscribe();
-        let (new_addr, new_server) =
-            torii_graphql::server::new(shutdown_rx, &pool, messaging.clone(), storage.clone())
-                .await;
-
-        tokio::spawn(new_server);
-
-        proxy_server.set_graphql_addr(new_addr).await;
-
-        // Break the loop if there are no more events
-        if broker.next().await.is_none() {
-            break;
-        } else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-}
 
 async fn verify_contracts_deployed(
     provider: &JsonRpcClient<HttpTransport>,
@@ -988,57 +730,4 @@ async fn stream_snapshot_into_file(
     instrumented_future.await
 }
 
-async fn generate_mkcert_certificates() -> anyhow::Result<(String, String)> {
-    // Check if mkcert is installed
-    let check_output = tokio::process::Command::new("mkcert")
-        .arg("-version")
-        .output()
-        .await;
 
-    if check_output.is_err() {
-        return Err(anyhow::anyhow!("mkcert is not installed. Please install mkcert first: https://github.com/FiloSottile/mkcert"));
-    }
-
-    // Create directory for certificates in temp dir
-    let cert_dir = std::env::temp_dir().join("torii-certs");
-    tokio::fs::create_dir_all(&cert_dir).await?;
-
-    let cert_path = cert_dir.join("localhost.pem");
-    let key_path = cert_dir.join("localhost-key.pem");
-
-    // Install the CA certificate
-    let install_output = tokio::process::Command::new("mkcert")
-        .arg("-install")
-        .output()
-        .await?;
-
-    if !install_output.status.success() {
-        return Err(anyhow::anyhow!(
-            "Failed to install mkcert CA: {}",
-            String::from_utf8_lossy(&install_output.stderr)
-        ));
-    }
-
-    // Generate certificates for localhost and 127.0.0.1
-    let output = tokio::process::Command::new("mkcert")
-        .arg("-cert-file")
-        .arg(&cert_path)
-        .arg("-key-file")
-        .arg(&key_path)
-        .arg("localhost")
-        .arg("127.0.0.1")
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "Failed to generate mkcert certificates: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    Ok((
-        cert_path.to_string_lossy().to_string(),
-        key_path.to_string_lossy().to_string(),
-    ))
-}

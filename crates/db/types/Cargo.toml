@@ -1,0 +1,18 @@
+[package]
+name = "torii-db-types"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+version.workspace = true
+
+[dependencies]
+starknet.workspace = true
+chrono.workspace = true
+dojo-types.workspace = true
+sqlx.workspace = true
+serde.workspace = true
+anyhow.workspace = true
+torii-storage.workspace = true
+torii-proto.workspace = true
+crypto-bigint.workspace = true
+serde_json.workspace = true

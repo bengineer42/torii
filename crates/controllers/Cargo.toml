@@ -19,6 +19,6 @@ tokio.workspace = true
 mockito = "1.2"
 url.workspace = true
 tempfile.workspace = true
-torii-sqlite.workspace = true
+torii-db.workspace = true
 starknet.workspace = true
 sqlx.workspace = true

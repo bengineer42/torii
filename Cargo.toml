@@ -3,17 +3,21 @@ resolver = "2"
 
 members = [
 	"bin/torii",
+	"crates/adigraphmap",
 	"crates/broker",
 	"crates/cli",
-	"crates/client",
 	"crates/messaging",
-	"crates/server",
-	"crates/sqlite/types",
-	"crates/task-network",
+	"crates/db/types",
+	"crates/db/db",
 	"crates/storage",
 	"crates/cache",
 	"crates/math",
 	"crates/controllers",
+	"crates/indexer/engine",
+	"crates/indexer/fetcher",
+	"crates/processors",
+	"crates/proto",
+	"crates/runner",
 ]
 
 [workspace.package]
@@ -34,7 +38,7 @@ debug = true
 inherits = "release"
 
 [workspace.dependencies]
-cainome = { version = "0.10.0", features = [ "abigen-rs" ] }
+cainome = { version = "0.10.0", features = ["abigen-rs"] }
 cainome-cairo-serde = { version = "0.4.0" }
 cainome-cairo-serde-derive = { version = "0.1.0" }
 
@@ -61,8 +65,8 @@ torii-libp2p-relay = { path = "crates/libp2p/relay" }
 torii-messaging = { path = "crates/messaging" }
 torii-runner = { path = "crates/runner" }
 torii-server = { path = "crates/server" }
-torii-sqlite = { path = "crates/sqlite/sqlite" }
-torii-sqlite-types = { path = "crates/sqlite/types" }
+torii-db = { path = "crates/db/db" }
+torii-db-types = { path = "crates/db/types" }
 torii-typed-data = { path = "crates/typed-data" }
 torii-processors = { path = "crates/processors" }
 torii-grpc-client = { path = "crates/grpc/client" }
@@ -114,10 +118,9 @@ serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 sqlx = { version = "0.8.2", features = [
 	"chrono",
 	"macros",
-	"regexp",
+	"postgres",
 	"runtime-async-std",
 	"runtime-tokio",
-	"sqlite",
 	"uuid",
 ] }
 strum = "0.25"

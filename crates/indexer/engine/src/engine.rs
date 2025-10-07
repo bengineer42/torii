@@ -232,7 +232,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
                                             error!(target: LOG_TARGET, error = ?e, "Processing fetched data.");
                                             processing_erroring_out = true;
                                             self.storage.rollback().await?;
-                                            self.task_manager.clear_tasks();
+                                            self.task_manager.clear();
                                             gauge!("torii_indexer_backoff_delay_seconds", "operation" => "process").set(processing_backoff_delay.as_secs_f64());
                                             sleep(processing_backoff_delay).await;
                                             if processing_backoff_delay < max_backoff_delay {
@@ -294,7 +294,7 @@ impl<P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static> Engine<P> {
         // Process parallelized events
         debug!(target: LOG_TARGET, "Processing parallelized events.");
         let instant = Instant::now();
-        self.task_manager.process_tasks().await?;
+        self.task_manager.process_ready_tasks().await?;
         debug!(target: LOG_TARGET, duration = ?instant.elapsed(), "Processed parallelized events.");
 
         // Apply ERC balances cache diff

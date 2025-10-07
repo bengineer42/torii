@@ -39,7 +39,7 @@ pub enum MessagingError {
     StorageError(#[from] torii_storage::StorageError),
 
     #[error(transparent)]
-    SqliteError(#[from] Box<torii_sqlite::error::Error>),
+    DbError(#[from] Box<torii_db::error::Error>),
 
     #[error(transparent)]
     ProviderError(#[from] starknet::providers::ProviderError),
