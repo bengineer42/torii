@@ -1508,8 +1508,8 @@ checksum = "fea41bba32d969b513997752735605054bc0dfa92b4c56bf1189f2e174be7a10"
 
 [[package]]
 name = "dojo-metrics"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "bytes",
  "http-body-util",
@@ -1529,8 +1529,8 @@ dependencies = [
 
 [[package]]
 name = "dojo-test-utils"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "assert_fs",
  "camino",
@@ -1542,8 +1542,8 @@ dependencies = [
 
 [[package]]
 name = "dojo-types"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "anyhow",
  "cainome",
@@ -1564,8 +1564,8 @@ dependencies = [
 
 [[package]]
 name = "dojo-utils"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "anyhow",
  "colored_json",
@@ -1581,8 +1581,8 @@ dependencies = [
 
 [[package]]
 name = "dojo-world"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4879,8 +4879,8 @@ dependencies = [
 
 [[package]]
 name = "scarb-interop"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "anyhow",
  "camino",
@@ -4907,8 +4907,8 @@ dependencies = [
 
 [[package]]
 name = "scarb-metadata-ext"
-version = "1.7.0"
-source = "git+https://github.com/dojoengine/dojo?rev=6daa3d0#6daa3d0d08e83fd61176d9164a1df42b82ba35be"
+version = "1.7.1"
+source = "git+https://github.com/bengineer42/dojo?branch=primitive-from-sql-new-models#c5df2f399635c30017457a5fe66f0f0dc84d879c"
 dependencies = [
  "anyhow",
  "camino",

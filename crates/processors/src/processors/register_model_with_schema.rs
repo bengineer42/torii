@@ -1,34 +1,31 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
-
+use crate::error::Error;
+use crate::schema::parse_struct_to_schema_with_namespace;
+use crate::task_manager::TaskId;
+use crate::{EventProcessor, EventProcessorContext};
 use async_trait::async_trait;
-use cainome::cairo_serde::Error as CainomeError;
 use dojo_types::naming::compute_selector_from_names;
-use dojo_types::schema::Ty;
+use dojo_world::contracts::abigen::model::Layout;
 use dojo_world::contracts::abigen::world::Event as WorldEvent;
-use dojo_world::contracts::model::{ModelError, ModelRPCReader, ModelReader};
-use dojo_world::contracts::WorldContractReader;
-use starknet::core::types::{BlockId, Event, StarknetError};
-use starknet::providers::{Provider, ProviderError};
+use dojo_world::contracts::model::ModelError;
+use metrics::counter;
+use starknet::core::types::Event;
+use starknet::providers::Provider;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use torii_proto::Model;
 use tracing::{debug, info};
 
-use crate::error::Error;
-use crate::task_manager::TaskId;
-use crate::{EventProcessor, EventProcessorContext};
-use metrics::counter;
-
-pub(crate) const LOG_TARGET: &str = "torii::indexer::processors::register_model";
+pub(crate) const LOG_TARGET: &str = "torii::indexer::processors::register_model_with_schema";
 
 #[derive(Default, Debug)]
-pub struct RegisterModelProcessor;
-
+pub struct RegisterModelWithSchemaProcessor;
+const USE_LEGACY_STORE: bool = true;
 #[async_trait]
-impl<P> EventProcessor<P> for RegisterModelProcessor
+impl<P> EventProcessor<P> for RegisterModelWithSchemaProcessor
 where
     P: Provider + Send + Sync + Clone + std::fmt::Debug + 'static,
 {
     fn event_key(&self) -> String {
-        "ModelRegistered".to_string()
+        "ModelWithSchemaRegistered".to_string()
     }
 
     // We might not need this anymore, since we don't have fallback and all world events must
@@ -43,10 +40,10 @@ where
         let selector = match WorldEvent::try_from(event).unwrap_or_else(|_| {
             panic!(
                 "Expected {} event to be well formed.",
-                <RegisterModelProcessor as EventProcessor<P>>::event_key(self)
+                <RegisterModelWithSchemaProcessor as EventProcessor<P>>::event_key(self)
             )
         }) {
-            WorldEvent::ModelRegistered(e) => compute_selector_from_names(
+            WorldEvent::ModelWithSchemaRegistered(e) => compute_selector_from_names(
                 &e.namespace.to_string().unwrap(),
                 &e.name.to_string().unwrap(),
             ),
@@ -66,10 +63,10 @@ where
         let event = match WorldEvent::try_from(&ctx.event).unwrap_or_else(|_| {
             panic!(
                 "Expected {} event to be well formed.",
-                <RegisterModelProcessor as EventProcessor<P>>::event_key(self)
+                <RegisterModelWithSchemaProcessor as EventProcessor<P>>::event_key(self)
             )
         }) {
-            WorldEvent::ModelRegistered(e) => e,
+            WorldEvent::ModelWithSchemaRegistered(e) => e,
             _ => {
                 unreachable!()
             }
@@ -86,49 +83,19 @@ where
             return Ok(());
         }
 
-        let world = WorldContractReader::new(ctx.event.from_address, &ctx.provider);
-        let namespace_for_metrics = namespace.clone();
-        let mut model = ModelRPCReader::new(
-            &namespace,
-            &name,
-            event.address.0,
-            event.class_hash.0,
-            &world,
-        )
-        .await;
-        if ctx.config.strict_model_reader {
-            model.set_block(BlockId::Number(ctx.block_number)).await;
-        }
-        let mut schema = model.schema().await?;
-        match &mut schema {
-            Ty::Struct(struct_ty) => {
-                struct_ty.name = format!("{}-{}", namespace, name);
-            }
-            _ => unreachable!(),
-        }
-
-        let use_legacy_store = match model.use_legacy_storage().await {
-            Ok(use_legacy_store) => use_legacy_store,
-            Err(ModelError::Cainome(CainomeError::Provider(ProviderError::StarknetError(
-                StarknetError::EntrypointNotFound,
-            )))) => {
-                debug!(target: LOG_TARGET, namespace = %namespace, name = %name, "Entrypoint not found, using legacy store.");
-                true
-            }
-            Err(e) => {
-                return Err(e.into());
-            }
-        };
-        let layout = model.layout().await?;
-
-        let unpacked_size: u32 = model.unpacked_size().await?;
-        let packed_size: u32 = model.packed_size().await?;
+        let schema = parse_struct_to_schema_with_namespace(&event.schema, &namespace, &name)
+            .map_err(ModelError::Parse)?;
+        let packed_size = 0;
+        let unpacked_size = 0;
+        let class_hash = 0.into();
+        let contract_address = 0.into();
+        let layout = Layout::Fixed(vec![]);
 
         info!(
             target: LOG_TARGET,
             namespace = %namespace,
             name = %name,
-            "Registered model."
+            "Registered model with Schema."
         );
 
         debug!(
@@ -136,8 +103,8 @@ where
             name,
             schema = ?schema,
             layout = ?layout,
-            class_hash = ?event.class_hash,
-            contract_address = ?event.address,
+            class_hash = ?class_hash,
+            contract_address = ?contract_address,
             packed_size = %packed_size,
             unpacked_size = %unpacked_size,
             "Registered model content."
@@ -148,14 +115,14 @@ where
                 selector,
                 &schema,
                 &layout,
-                event.class_hash.into(),
-                event.address.into(),
+                class_hash,
+                contract_address,
                 packed_size,
                 unpacked_size,
                 ctx.block_timestamp,
                 None,
                 None,
-                use_legacy_store,
+                USE_LEGACY_STORE,
             )
             .await?;
 
@@ -164,15 +131,15 @@ where
                 selector,
                 Model {
                     selector,
-                    namespace,
+                    namespace: namespace.clone(),
                     name,
-                    class_hash: event.class_hash.into(),
-                    contract_address: event.address.into(),
+                    class_hash: class_hash.into(),
+                    contract_address: contract_address.into(),
                     packed_size,
                     unpacked_size,
                     layout,
                     schema,
-                    use_legacy_store,
+                    use_legacy_store: USE_LEGACY_STORE,
                 },
             )
             .await;
@@ -180,9 +147,9 @@ where
         // Record successful model registration with context
         counter!(
             "torii_processor_operations_total",
-            "operation" => "model_registered",
-            "namespace" => namespace_for_metrics,
-            "legacy_store" => use_legacy_store.to_string()
+            "operation" => "model_with_schema_registered",
+            "namespace" => namespace,
+            "legacy_store" => USE_LEGACY_STORE.to_string()
         )
         .increment(1);
 

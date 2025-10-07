@@ -44,14 +44,14 @@ cainome-cairo-serde-derive = { version = "0.1.0" }
 
 
 # dojo
-dojo-utils = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-dojo-types = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-dojo-world = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-dojo-test-utils = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-dojo-metrics = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-scarb-metadata-ext = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-scarb-interop = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
-sozo-ops = { git = "https://github.com/dojoengine/dojo", rev = "6daa3d0" }
+dojo-utils = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+dojo-types = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+dojo-world = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+dojo-test-utils = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+dojo-metrics = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+scarb-metadata-ext = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+scarb-interop = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+sozo-ops = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
 
 # katana
 katana-runner = { git = "https://github.com/dojoengine/katana", rev = "eba352a" }

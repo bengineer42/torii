@@ -10,6 +10,7 @@ use dojo_world::{config::WorldMetadata, contracts::abigen::model::Layout};
 use sqlx::{postgres::PgRow, FromRow, Row};
 use starknet::core::types::U256;
 use starknet_crypto::{poseidon_hash_many, Felt};
+use torii_db_types::{HookEvent, Model as SQLModel};
 use torii_math::I256;
 use torii_proto::{
     schema::Entity, Activity, ActivityQuery, AggregationEntry, AggregationQuery, BalanceId,
@@ -18,7 +19,6 @@ use torii_proto::{
     Query, Token, TokenBalance, TokenBalanceQuery, TokenContract, TokenContractQuery, TokenId,
     TokenQuery, TokenTransfer, TokenTransferQuery, Transaction, TransactionCall, TransactionQuery,
 };
-use torii_db_types::{HookEvent, Model as SQLModel};
 use torii_storage::{ReadOnlyStorage, Storage, StorageError};
 use tracing::warn;
 
@@ -217,9 +217,7 @@ impl ReadOnlyStorage for Sql {
             .items
             .into_iter()
             .map(|row| {
-                Result::<Controller, Error>::Ok(
-                    torii_db_types::Controller::from_row(&row)?.into(),
-                )
+                Result::<Controller, Error>::Ok(torii_db_types::Controller::from_row(&row)?.into())
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page {
@@ -332,9 +330,7 @@ impl ReadOnlyStorage for Sql {
         let items: Vec<Token> = page
             .items
             .into_iter()
-            .map(|row| {
-                Result::<Token, Error>::Ok(torii_db_types::Token::from_row(&row)?.into())
-            })
+            .map(|row| Result::<Token, Error>::Ok(torii_db_types::Token::from_row(&row)?.into()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page {
             items,
@@ -661,9 +657,7 @@ impl ReadOnlyStorage for Sql {
         let items: Vec<Event> = page
             .items
             .into_iter()
-            .map(|row| {
-                Result::<Event, Error>::Ok(torii_db_types::Event::from_row(&row)?.into())
-            })
+            .map(|row| Result::<Event, Error>::Ok(torii_db_types::Event::from_row(&row)?.into()))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Page {
             items,
