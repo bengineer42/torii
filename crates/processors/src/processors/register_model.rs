@@ -51,7 +51,7 @@ where
                 &e.name.to_string().unwrap(),
             ),
             _ => {
-                unreachable!()
+                return 0;
             }
         };
 
@@ -71,7 +71,9 @@ where
         }) {
             WorldEvent::ModelRegistered(e) => e,
             _ => {
-                unreachable!()
+                // This processor only handles ModelRegistered events
+                // If we receive a different event type, skip processing
+                return Ok(());
             }
         };
 
@@ -104,7 +106,7 @@ where
             Ty::Struct(struct_ty) => {
                 struct_ty.name = format!("{}-{}", namespace, name);
             }
-            _ => unreachable!(),
+            _ => {}
         }
 
         let use_legacy_store = match model.use_legacy_storage().await {

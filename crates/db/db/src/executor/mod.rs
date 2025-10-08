@@ -26,9 +26,9 @@ use torii_broker::types::{
     EventUpdate, InnerType, ModelUpdate, TokenBalanceUpdate, TokenTransferUpdate, TokenUpdate,
     TransactionUpdate, Update,
 };
+use torii_db_types::TokenTransfer as SQLTokenTransfer;
 use torii_math::I256;
 use torii_proto::{BalanceId, ContractCursor, TokenId, TransactionCall};
-use torii_db_types::TokenTransfer as SQLTokenTransfer;
 use tracing::{debug, error, info, warn};
 
 use crate::constants::TOKENS_TABLE;
@@ -47,7 +47,7 @@ pub mod error;
 pub use erc::{RegisterNftTokenQuery, RegisterTokenContractQuery};
 use sqlx::Executor as SqlxExecutor;
 
-pub(crate) const LOG_TARGET: &str = "torii::sqlite::executor";
+pub(crate) const LOG_TARGET: &str = "torii::postgres::executor";
 
 pub type Result<T> = std::result::Result<T, ExecutorError>;
 pub type QueryResult<T> = std::result::Result<T, ExecutorQueryError>;
@@ -337,6 +337,9 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         let start_time = Instant::now();
         let query_type_str = format!("{}", query_message.query_type);
 
+        // DEBUG: Log the SQL statement to identify syntax errors
+        debug!(target: LOG_TARGET, "Executing SQL: {}", query_message.statement);
+
         let tx = self.transaction.as_mut().unwrap();
 
         let mut query = sqlx::query(&query_message.statement);
@@ -476,7 +479,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     "SELECT contract_address FROM contracts 
                      WHERE contract_address IN (
                          SELECT contract_address FROM transaction_contract 
-                         WHERE transaction_hash = ?
+                         WHERE transaction_hash = $1
                      ) AND contract_type = 'WORLD'
                      LIMIT 1",
                 )
@@ -498,18 +501,27 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                         .map(felt_to_sql_string)
                         .collect();
 
-                    let placeholders = model_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-                    let query = format!(
-                        "SELECT DISTINCT namespace FROM models WHERE id IN ({})",
-                        placeholders
-                    );
+                    let namespaces: Vec<String> = if model_ids.is_empty() {
+                        Vec::new()
+                    } else {
+                        let placeholders = model_ids
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| format!("${}", i + 1))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        let query = format!(
+                            "SELECT DISTINCT namespace FROM models WHERE id IN ({})",
+                            placeholders
+                        );
 
-                    let mut query_builder = sqlx::query_scalar(&query);
-                    for model_id in &model_ids {
-                        query_builder = query_builder.bind(model_id);
-                    }
+                        let mut query_builder = sqlx::query_scalar(&query);
+                        for model_id in &model_ids {
+                            query_builder = query_builder.bind(model_id);
+                        }
 
-                    let namespaces: Vec<String> = query_builder.fetch_all(&mut **tx).await?;
+                        query_builder.fetch_all(&mut **tx).await?
+                    };
 
                     // Track activity for each call, per namespace
                     let mut activity_updates = Vec::new();
@@ -573,8 +585,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                 // Handle historical entities similar to historical event messages
                 let mut entity_counter: i64 = sqlx::query_scalar::<_, i64>(
-                    "SELECT historical_counter FROM entity_model WHERE entity_id = ? AND model_id \
-                     = ?",
+                    "SELECT historical_counter FROM entity_model WHERE entity_id = $1 AND model_id = $2",
                 )
                 .bind(entity.entity_id.clone())
                 .bind(entity.model_id.clone())
@@ -590,7 +601,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     if let Some(keys) = entity.keys_str {
                         sqlx::query(
                             "INSERT INTO entities_historical (id, keys, event_id, data, model_id, \
-                             executed_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+                             executed_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
                         )
                         .bind(entity.entity_id.clone())
                         .bind(keys)
@@ -603,7 +614,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     } else {
                         sqlx::query(
                             "INSERT INTO entities_historical (id, event_id, data, model_id, \
-                             executed_at) VALUES (?, ?, ?, ?, ?) RETURNING *",
+                             executed_at) VALUES ($1, $2, $3, $4, $5) RETURNING *",
                         )
                         .bind(entity.entity_id.clone())
                         .bind(entity.event_id.clone())
@@ -617,7 +628,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                 sqlx::query(
                     "INSERT INTO entity_model (entity_id, model_id, historical_counter) VALUES \
-                     (?, ?, ?) ON CONFLICT(entity_id, model_id) DO UPDATE SET \
+                     ($1, $2, $3) ON CONFLICT(entity_id, model_id) DO UPDATE SET \
                      historical_counter=EXCLUDED.historical_counter",
                 )
                 .bind(entity.entity_id.clone())
@@ -678,15 +689,15 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     return Ok(());
                 }
 
-                sqlx::query("DELETE FROM entity_model WHERE entity_id = ? AND model_id = ?")
+                sqlx::query("DELETE FROM entity_model WHERE entity_id = $1 AND model_id = $2")
                     .bind(entity.entity_id.clone())
                     .bind(entity.model_id)
                     .execute(&mut **tx)
                     .await?;
 
                 let row = sqlx::query(
-                    "UPDATE entities SET updated_at=CURRENT_TIMESTAMP, executed_at=?, event_id=? \
-                     WHERE id = ? RETURNING *",
+                    "UPDATE entities SET updated_at=CURRENT_TIMESTAMP, executed_at=$1, event_id=$2 \
+                     WHERE id = $3 RETURNING *",
                 )
                 .bind(entity.block_timestamp)
                 .bind(entity.event_id)
@@ -700,7 +711,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 }));
 
                 let count = sqlx::query_scalar::<_, i64>(
-                    "SELECT count(*) FROM entity_model WHERE entity_id = ?",
+                    "SELECT count(*) FROM entity_model WHERE entity_id = $1",
                 )
                 .bind(entity_updated.id.clone())
                 .fetch_one(&mut **tx)
@@ -708,7 +719,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                 // Delete entity if all of its models are deleted
                 if count == 0 {
-                    sqlx::query("DELETE FROM entities WHERE id = ?")
+                    sqlx::query("DELETE FROM entities WHERE id = $1")
                         .bind(entity_updated.id.clone())
                         .execute(&mut **tx)
                         .await?;
@@ -737,8 +748,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 // Must be executed first since other tables have foreign keys on event_messages.id.
                 let event_messages_row = query.fetch_one(&mut **tx).await?;
                 let mut event_counter: i64 = sqlx::query_scalar::<_, i64>(
-                    "SELECT historical_counter FROM event_model WHERE entity_id = ? AND model_id \
-                     = ?",
+                    "SELECT historical_counter FROM event_model WHERE entity_id = $1 AND model_id \
+                     = $2",
                 )
                 .bind(em_query.entity_id.clone())
                 .bind(em_query.model_id.clone())
@@ -753,7 +764,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                         .map_err(|e| ExecutorQueryError::Parse(ParseError::FromJsonStr(e)))?;
                     sqlx::query(
                         "INSERT INTO event_messages_historical (id, keys, event_id, data, \
-                         model_id, executed_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+                         model_id, executed_at) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *",
                     )
                     .bind(em_query.entity_id.clone())
                     .bind(em_query.keys_str.clone())
@@ -766,8 +777,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 }
 
                 sqlx::query(
-                    "INSERT INTO event_model (entity_id, model_id, historical_counter) VALUES (?, \
-                     ?, ?) ON CONFLICT(entity_id, model_id) DO UPDATE SET \
+                    "INSERT INTO event_model (entity_id, model_id, historical_counter) VALUES ($1, \
+                     $2, $3) ON CONFLICT(entity_id, model_id) DO UPDATE SET \
                      historical_counter=EXCLUDED.historical_counter",
                 )
                 .bind(em_query.entity_id.clone())
@@ -848,7 +859,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
             QueryType::RegisterNftToken(register_nft_token) => {
                 // Check if we already have the metadata for this contract
                 let res = sqlx::query_as::<_, (String, String)>(&format!(
-                    "SELECT name, symbol FROM {TOKENS_TABLE} WHERE contract_address = ? LIMIT 1"
+                    "SELECT name, symbol FROM {TOKENS_TABLE} WHERE contract_address = $1 LIMIT 1"
                 ))
                 .bind(felt_to_sql_string(&register_nft_token.contract_address))
                 .fetch_one(&mut **tx)
@@ -947,7 +958,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                 let query = sqlx::query_as::<_, torii_db_types::Token>(
                     "INSERT INTO tokens (id, contract_address, token_id, name, symbol, decimals, \
-                     metadata, total_supply, traits) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+                     metadata, total_supply, traits) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *",
                 )
                 .bind(felt_and_u256_to_sql_string(
                     &register_nft_token.contract_address,
@@ -980,8 +991,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
             }
             QueryType::RegisterTokenContract(register_token_contract) => {
                 let query = sqlx::query_as::<_, torii_db_types::Token>(
-                    "INSERT INTO tokens (id, contract_address, name, symbol, decimals, metadata, total_supply, traits) VALUES (?, \
-                     ?, ?, ?, ?, ?, ?, ?) RETURNING *",
+                    "INSERT INTO tokens (id, contract_address, name, symbol, decimals, metadata, total_supply, traits) VALUES ($1, \
+                     $2, $3, $4, $5, $6, $7, $8) RETURNING *",
                 )
                 .bind(felt_to_sql_string(&register_token_contract.contract_address))
                 .bind(felt_to_sql_string(&register_token_contract.contract_address))
@@ -1012,7 +1023,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
             QueryType::UpdateTokenMetadata(update_metadata) => {
                 // Update metadata and timestamp in database
                 let token = sqlx::query_as::<_, torii_db_types::Token>(
-                    "UPDATE tokens SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING *",
+                    "UPDATE tokens SET metadata = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *",
                 )
                 .bind(&update_metadata.metadata)
                 .bind(update_metadata.token_id.to_string())
@@ -1022,12 +1033,13 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 // If this is an individual token (has token_id), update attributes and contract's traits
                 if update_metadata.token_id.is_nft() {
                     // Get the old metadata before updating (needed for trait subtraction)
-                    let old_metadata =
-                        sqlx::query_scalar::<_, String>("SELECT metadata FROM tokens WHERE id = ?")
-                            .bind(update_metadata.token_id.to_string())
-                            .fetch_optional(&mut **tx)
-                            .await?
-                            .unwrap_or_default();
+                    let old_metadata = sqlx::query_scalar::<_, String>(
+                        "SELECT metadata FROM tokens WHERE id = $1",
+                    )
+                    .bind(update_metadata.token_id.to_string())
+                    .fetch_optional(&mut **tx)
+                    .await?
+                    .unwrap_or_default();
 
                     // Update individual token attributes
                     store_token_attributes(&update_metadata.metadata, &token.id, &mut *tx).await?;
@@ -1072,23 +1084,9 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
             transaction.commit().await?;
         }
 
-        // Run PRAGMA optimize after committing transaction if interval has elapsed
-        // This is the optimal time since the transaction is closed and tables may have changed
-        if self.config.optimize_interval > 0 {
-            let should_optimize = match self.last_optimization {
-                None => true, // Never optimized, do it now
-                Some(last) => last.elapsed().as_secs() >= self.config.optimize_interval,
-            };
-
-            if should_optimize {
-                if let Err(e) = self.pool.execute("PRAGMA optimize").await {
-                    debug!(target: LOG_TARGET, error = ?e, "Failed to run optimization after commit");
-                } else {
-                    debug!(target: LOG_TARGET, "Ran PRAGMA optimize after commit");
-                    self.last_optimization = Some(Instant::now());
-                }
-            }
-        }
+        // Skip SQLite PRAGMA optimize for PostgreSQL
+        // PostgreSQL handles optimization automatically
+        // TODO: Consider PostgreSQL-specific optimization if needed
 
         // Check WAL size and truncate if it exceeds threshold
         if self.config.wal_truncate_size_threshold > 0 {
@@ -1139,11 +1137,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     "WAL size exceeds threshold, performing TRUNCATE checkpoint"
                 );
 
-                // Perform TRUNCATE checkpoint
-                self.pool
-                    .execute("PRAGMA wal_checkpoint(TRUNCATE);")
-                    .await?;
-
+                // Skip SQLite WAL checkpoint for PostgreSQL
+                // PostgreSQL handles WAL management automatically
                 counter!("torii_executor_wal_checkpoint_truncate_total").increment(1);
 
                 histogram!("torii_executor_wal_size_at_truncate_bytes").record(wal_size as f64);

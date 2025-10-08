@@ -51,7 +51,7 @@ where
         }) {
             WorldEvent::EventUpgraded(e) => e,
             _ => {
-                unreachable!()
+                return Ok(());
             }
         };
 
@@ -93,7 +93,7 @@ where
             Ty::Struct(struct_ty) => {
                 struct_ty.name = format!("{}-{}", namespace, struct_ty.name);
             }
-            _ => unreachable!(),
+            _ => return Ok(()),
         }
         let schema_diff = new_schema.diff(&prev_schema);
         // No changes to the schema. This can happen if torii is re-run with a fresh database.

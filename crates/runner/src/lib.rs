@@ -370,41 +370,9 @@ impl Runner {
         
         info!(target: LOG_TARGET, "Successfully connected to PostgreSQL database");
 
-        let mut migrate_handle = database_pool.acquire().await?;
-        if let Some(migrations) = self.args.sql.migrations {
-            // Create a temporary directory to combine migrations
-            let temp_migrations = TempDir::new()?;
-
-            // Copy default migrations first
-            let default_migrations_dir =
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../migrations");
-            for entry in std::fs::read_dir(default_migrations_dir)? {
-                let entry = entry?;
-                let target = temp_migrations.path().join(entry.file_name());
-                std::fs::copy(entry.path(), target)?;
-            }
-
-            // Copy custom migrations
-            for entry in std::fs::read_dir(&migrations)? {
-                let entry = entry?;
-                let target = temp_migrations.path().join(entry.file_name());
-                std::fs::copy(entry.path(), target)?;
-            }
-
-            // Run combined migrations
-            let migrator = sqlx::migrate::Migrator::new(temp_migrations.path()).await?;
-            migrator.run(&mut migrate_handle).await?;
-        } else {
-            sqlx::migrate!("../migrations")
-                .run(&mut migrate_handle)
-                .await?;
-        }
-
-        // PostgreSQL doesn't use PRAGMA statements like SQLite
-        // For PostgreSQL, we could run ANALYZE but it's not critical during startup
-        // sqlx::query("ANALYZE").execute(&mut *migrate_handle).await?;
-
-        drop(migrate_handle);
+        // Initialize essential PostgreSQL tables
+        Self::initialize_postgresql_schema(&database_pool).await?;
+        info!(target: LOG_TARGET, "PostgreSQL schema initialized");
 
         if self.args.sql.all_model_indices && !self.args.sql.model_indices.is_empty() {
             warn!(
@@ -728,6 +696,166 @@ async fn stream_snapshot_into_file(
     .instrument(span);
 
     instrumented_future.await
+}
+
+impl Runner {
+    /// Initialize essential PostgreSQL tables that the system expects to exist
+    async fn initialize_postgresql_schema(pool: &sqlx::Pool<sqlx::Postgres>) -> Result<(), anyhow::Error> {
+        let mut conn = pool.acquire().await?;
+        
+        // Create contracts table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS contracts (
+                id TEXT NOT NULL PRIMARY KEY,
+                contract_address TEXT NOT NULL,
+                contract_type TEXT NOT NULL,
+                head BIGINT,
+                last_block_timestamp BIGINT,
+                last_pending_block_tx TEXT,
+                tps BIGINT,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create models table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS models (
+                id TEXT NOT NULL PRIMARY KEY,
+                name TEXT NOT NULL,
+                namespace TEXT NOT NULL DEFAULT '',
+                layout TEXT NOT NULL,
+                schema BYTEA NOT NULL DEFAULT '',
+                contract_address TEXT NOT NULL DEFAULT '',
+                transaction_hash TEXT,
+                class_hash TEXT NOT NULL,
+                packed_size INTEGER NOT NULL,
+                unpacked_size INTEGER NOT NULL,
+                legacy_store BOOLEAN NOT NULL DEFAULT false,
+                executed_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create model indices for performance
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_models_created_at ON models (created_at)")
+            .execute(&mut *conn).await?;
+        
+        // Create events table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS events (
+                id TEXT NOT NULL PRIMARY KEY,
+                keys TEXT NOT NULL,
+                data TEXT NOT NULL,
+                transaction_hash TEXT NOT NULL,
+                executed_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create event_model table for linking events to models
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS event_model (
+                event_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                PRIMARY KEY (event_id, model_id),
+                FOREIGN KEY (event_id) REFERENCES events (id),
+                FOREIGN KEY (model_id) REFERENCES models (id)
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create transactions table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS transactions (
+                id TEXT NOT NULL PRIMARY KEY,
+                transaction_hash TEXT NOT NULL UNIQUE,
+                sender_address TEXT NOT NULL,
+                calldata TEXT,
+                max_fee TEXT,
+                signature TEXT,
+                nonce TEXT,
+                executed_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create tokens table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tokens (
+                id TEXT NOT NULL PRIMARY KEY,
+                contract_address TEXT NOT NULL,
+                name TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                decimals INTEGER NOT NULL,
+                token_id TEXT,
+                metadata TEXT,
+                total_supply TEXT,
+                traits TEXT,
+                FOREIGN KEY (contract_address) REFERENCES contracts(id)
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create token_balances table (renamed from balances)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS token_balances (
+                id TEXT NOT NULL PRIMARY KEY,
+                balance TEXT NOT NULL,
+                account_address TEXT NOT NULL,
+                contract_address TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                FOREIGN KEY (token_id) REFERENCES tokens(id)
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create indices for token_balances
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_balances_account_address ON token_balances (account_address)")
+            .execute(&mut *conn).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_balances_contract_address ON token_balances (contract_address)")
+            .execute(&mut *conn).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_balances_account_contract ON token_balances (account_address, contract_address)")
+            .execute(&mut *conn).await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_token_balances_account_contract_token ON token_balances (account_address, contract_address, token_id)")
+            .execute(&mut *conn).await?;
+        
+        // Create token_transfers table (renamed from erc_transfers)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS token_transfers (
+                id TEXT NOT NULL PRIMARY KEY,
+                contract_address TEXT NOT NULL,
+                from_address TEXT NOT NULL,
+                to_address TEXT NOT NULL,
+                amount TEXT NOT NULL,
+                token_id TEXT NOT NULL,
+                executed_at TIMESTAMPTZ NOT NULL,
+                FOREIGN KEY (token_id) REFERENCES tokens(id)
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create entities table
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS entities (
+                id TEXT NOT NULL PRIMARY KEY,
+                event_id TEXT,
+                executed_at TIMESTAMPTZ NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )"
+        ).execute(&mut *conn).await?;
+        
+        // Create entity_model table for linking entities to models
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS entity_model (
+                entity_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                PRIMARY KEY (entity_id, model_id),
+                FOREIGN KEY (entity_id) REFERENCES entities (id),
+                FOREIGN KEY (model_id) REFERENCES models (id)
+            )"
+        ).execute(&mut *conn).await?;
+        
+        Ok(())
+    }
 }
 
 

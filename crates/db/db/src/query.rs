@@ -91,7 +91,7 @@ impl QueryBuilder {
 
     pub fn build(self) -> String {
         let mut query = format!(
-            "SELECT {} FROM [{}] {}",
+            "SELECT {} FROM \"{}\" {}",
             self.selections.join(", "),
             self.table_name,
             self.table_alias

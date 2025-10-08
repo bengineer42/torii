@@ -72,7 +72,9 @@ where
         }) {
             WorldEvent::StoreUpdateMembers(e) => e,
             _ => {
-                unreachable!()
+                // This processor only handles StoreUpdateMembers events
+                // If we receive a different event type, skip processing
+                return Ok(());
             }
         };
 

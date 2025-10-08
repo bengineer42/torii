@@ -47,7 +47,7 @@ where
                 &e.name.to_string().unwrap(),
             ),
             _ => {
-                unreachable!()
+                return 0;
             }
         };
 
@@ -67,7 +67,7 @@ where
         }) {
             WorldEvent::EventRegistered(e) => e,
             _ => {
-                unreachable!()
+                return Ok(());
             }
         };
 
@@ -101,7 +101,7 @@ where
             Ty::Struct(struct_ty) => {
                 struct_ty.name = format!("{}-{}", namespace, struct_ty.name);
             }
-            _ => unreachable!(),
+            _ => {},
         }
         let layout = model.layout().await?;
         // Events are never stored onchain, hence no packing or unpacking.

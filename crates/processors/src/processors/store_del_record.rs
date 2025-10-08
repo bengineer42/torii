@@ -63,7 +63,9 @@ where
         }) {
             WorldEvent::StoreDelRecord(e) => e,
             _ => {
-                unreachable!()
+                // This processor only handles StoreDelRecord events
+                // If we receive a different event type, skip processing
+                return Ok(());
             }
         };
 

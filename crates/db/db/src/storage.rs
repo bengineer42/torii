@@ -43,7 +43,7 @@ use crate::{
     Sql,
 };
 
-pub const LOG_TARGET: &str = "torii::sqlite::storage";
+pub const LOG_TARGET: &str = "torii::postgres::storage";
 
 #[async_trait]
 impl ReadOnlyStorage for Sql {
@@ -827,7 +827,7 @@ impl ReadOnlyStorage for Sql {
         model_selector: Felt,
     ) -> Result<Option<Ty>, StorageError> {
         let mut schema = self.model(model_selector).await?.schema;
-        let query = format!("SELECT * FROM [{}] WHERE internal_id = ?", schema.name());
+        let query = format!("SELECT * FROM \"{}\" WHERE internal_id = $1", schema.name());
         let mut query = sqlx::query(&query);
         query = query.bind(felt_to_sql_string(&entity_id));
         let row: Option<PgRow> = query.fetch_optional(&self.pool).await?;
@@ -1032,8 +1032,8 @@ impl Storage for Sql {
 
         let insert_models =
             "INSERT INTO models (id, namespace, name, class_hash, contract_address, layout, \
-             legacy_store, schema, packed_size, unpacked_size, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-             ?) ON CONFLICT(id) DO UPDATE SET contract_address=EXCLUDED.contract_address, \
+             legacy_store, schema, packed_size, unpacked_size, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, \
+             $11::timestamp with time zone) ON CONFLICT(id) DO UPDATE SET contract_address=EXCLUDED.contract_address, \
              class_hash=EXCLUDED.class_hash, layout=EXCLUDED.layout, legacy_store=EXCLUDED.legacy_store, \
              schema=EXCLUDED.schema, packed_size=EXCLUDED.packed_size, unpacked_size=EXCLUDED.unpacked_size, \
              executed_at=EXCLUDED.executed_at RETURNING *";
@@ -1143,12 +1143,12 @@ impl Storage for Sql {
         let keys_str = keys.map(|keys| felts_to_sql_string(&keys));
 
         let insert_entities = if keys_str.is_some() {
-            "INSERT INTO entities (id, event_id, executed_at, keys) VALUES (?, ?, ?, ?) ON \
+            "INSERT INTO entities (id, event_id, executed_at, keys) VALUES ($1, $2, $3::timestamp with time zone, $4) ON \
              CONFLICT(id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP, \
              executed_at=EXCLUDED.executed_at, event_id=EXCLUDED.event_id, keys=EXCLUDED.keys \
              RETURNING *"
         } else {
-            "INSERT INTO entities (id, event_id, executed_at) VALUES (?, ?, ?) ON CONFLICT(id) DO \
+            "INSERT INTO entities (id, event_id, executed_at) VALUES ($1, $2, $3::timestamp with time zone) ON CONFLICT(id) DO \
              UPDATE SET updated_at=CURRENT_TIMESTAMP, executed_at=EXCLUDED.executed_at, \
              event_id=EXCLUDED.event_id RETURNING *"
         };
@@ -1182,7 +1182,7 @@ impl Storage for Sql {
             })?;
 
         self.executor.send(QueryMessage::other(
-            "INSERT INTO entity_model (entity_id, model_id) VALUES (?, ?) ON CONFLICT(entity_id, \
+            "INSERT INTO entity_model (entity_id, model_id) VALUES ($1, $2) ON CONFLICT(entity_id, \
              model_id) DO NOTHING"
                 .to_string(),
             vec![
@@ -1240,7 +1240,7 @@ impl Storage for Sql {
         let block_timestamp_str = utc_dt_string_from_timestamp(block_timestamp);
 
         let insert_entities = "INSERT INTO event_messages (id, keys, event_id, executed_at) \
-                               VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET \
+                               VALUES ($1, $2, $3, $4::timestamp with time zone) ON CONFLICT(id) DO UPDATE SET \
                                updated_at=CURRENT_TIMESTAMP, executed_at=EXCLUDED.executed_at, \
                                event_id=EXCLUDED.event_id RETURNING *";
         self.executor
@@ -1360,7 +1360,7 @@ impl Storage for Sql {
 
         self.executor
             .send(QueryMessage::other(
-                "INSERT INTO metadata (id, uri, executed_at) VALUES (?, ?, ?) ON CONFLICT(id) DO \
+                "INSERT INTO metadata (id, uri, executed_at) VALUES ($1, $2, $3::timestamp with time zone) ON CONFLICT(id) DO \
              UPDATE SET id=excluded.id, executed_at=excluded.executed_at, \
              updated_at=CURRENT_TIMESTAMP"
                     .to_string(),
@@ -1434,8 +1434,8 @@ impl Storage for Sql {
         self.executor
             .send(QueryMessage::new(
                 "INSERT INTO transactions (id, transaction_hash, sender_address, calldata, \
-             max_fee, signature, nonce, transaction_type, executed_at, block_number) VALUES (?, \
-             ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO UPDATE SET transaction_hash=excluded.transaction_hash RETURNING *"
+             max_fee, signature, nonce, transaction_type, executed_at, block_number) VALUES ($1, \
+             $2, $3, $4, $5, $6, $7, $8, $9::timestamp with time zone, $10::bigint) ON CONFLICT(id) DO UPDATE SET transaction_hash=excluded.transaction_hash RETURNING *"
                     .to_string(),
                 vec![
                     Argument::FieldElement(transaction_hash),
@@ -1498,7 +1498,7 @@ impl Storage for Sql {
     ) -> Result<(), StorageError> {
         let insert_controller = "
             INSERT INTO controllers (id, username, address, deployed_at)
-            VALUES (?, ?, ?, ?)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT(id) DO UPDATE SET
                 username=EXCLUDED.username,
                 address=EXCLUDED.address,
@@ -1613,7 +1613,7 @@ impl Storage for Sql {
 
         let insert_query = format!(
             "INSERT INTO {TOKEN_TRANSFER_TABLE} (id, contract_address, from_address, to_address, \
-             amount, token_id, event_id, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING RETURNING *"
+             amount, token_id, event_id, executed_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamp with time zone) ON CONFLICT(id) DO NOTHING RETURNING *"
         );
 
         self.executor

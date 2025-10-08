@@ -53,7 +53,7 @@ where
         }) {
             WorldEvent::MetadataUpdate(e) => e,
             _ => {
-                unreachable!()
+                return Ok(());
             }
         };
 

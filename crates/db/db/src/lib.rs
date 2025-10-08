@@ -212,7 +212,7 @@ impl Sql {
         // Try to insert first - this will only succeed if the entity doesn't exist
         let placeholders: Vec<String> = (1..=arguments.len()).map(|i| format!("${}", i)).collect();
         let insert_statement = format!(
-            "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT(internal_id) DO UPDATE SET {}",
+            "INSERT INTO \"{}\" ({}) VALUES ({}) ON CONFLICT(internal_id) DO UPDATE SET {}",
             model_name,
             columns.join(","),
             placeholders.join(","),
@@ -249,18 +249,18 @@ impl Sql {
 
         // Start building the create table query with internal columns
         let mut create_table_query = format!(
-            "CREATE TABLE IF NOT EXISTS [{table_id}] (internal_id TEXT NOT NULL PRIMARY KEY, \
+            "CREATE TABLE IF NOT EXISTS \"{table_id}\" (internal_id TEXT NOT NULL PRIMARY KEY, \
              internal_event_id TEXT NOT NULL, internal_entity_id TEXT, internal_event_message_id \
              TEXT, "
         );
 
         indices.push(format!(
-            "CREATE INDEX IF NOT EXISTS [idx_{table_id}_internal_entity_id] ON [{table_id}] \
-             ([internal_entity_id]);"
+            "CREATE INDEX IF NOT EXISTS \"idx_{table_id}_internal_entity_id\" ON \"{table_id}\" \
+             (\"internal_entity_id\");"
         ));
         indices.push(format!(
-            "CREATE INDEX IF NOT EXISTS [idx_{table_id}_internal_event_message_id] ON \
-             [{table_id}] ([internal_event_message_id]);"
+            "CREATE INDEX IF NOT EXISTS \"idx_{table_id}_internal_event_message_id\" ON \
+             \"{table_id}\" (\"internal_event_message_id\");"
         ));
 
         // Recursively add columns for all nested type
@@ -282,11 +282,11 @@ impl Sql {
         }
 
         // Add internal timestamps
-        create_table_query.push_str("internal_executed_at DATETIME NOT NULL, ");
+        create_table_query.push_str("internal_executed_at TIMESTAMPTZ NOT NULL, ");
         create_table_query
-            .push_str("internal_created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, ");
+            .push_str("internal_created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, ");
         create_table_query
-            .push_str("internal_updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, ");
+            .push_str("internal_updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP, ");
 
         // Add foreign key constraints
         create_table_query.push_str("FOREIGN KEY (internal_entity_id) REFERENCES entities(id), ");
@@ -352,19 +352,19 @@ impl Sql {
                 || (model_indices.is_none() && (self.config.all_model_indices || is_key))
             {
                 indices.push(format!(
-                    "CREATE INDEX IF NOT EXISTS [idx_{table_id}_{name}] ON [{table_id}] ([{name}]);"
+                    "CREATE INDEX IF NOT EXISTS \"idx_{table_id}_{name}\" ON \"{table_id}\" (\"{name}\");"
                 ));
             }
         };
 
         let mut add_column = |name: &str, sql_type: &str, indices: &mut Vec<String>| {
-            columns.push(format!("[{name}] {sql_type}"));
+            columns.push(format!("\"{name}\" {sql_type}"));
             add_index(indices, name);
         };
 
         let mut alter_column = |name: &str, sql_type: &str, indices: &mut Vec<String>| {
             alter_table_queries.push(format!(
-                "ALTER TABLE [{table_id}] ADD COLUMN [{name}] {sql_type}"
+                "ALTER TABLE \"{table_id}\" ADD COLUMN \"{name}\" {sql_type}"
             ));
             add_index(indices, name);
         };
@@ -374,20 +374,20 @@ impl Sql {
                              sql_type: &str,
                              sql_value: &str| {
             alter_table_queries.push(format!(
-            "CREATE TEMPORARY TABLE [tmp_values_{name}] AS SELECT internal_id, [{name}] FROM [{table_id}]"
+            "CREATE TEMPORARY TABLE \"tmp_values_{name}\" AS SELECT internal_id, \"{name}\" FROM \"{table_id}\""
         ));
-            alter_table_queries.push(format!("DROP INDEX IF EXISTS [idx_{table_id}_{name}]"));
-            alter_table_queries.push(format!("ALTER TABLE [{table_id}] DROP COLUMN [{name}]"));
+            alter_table_queries.push(format!("DROP INDEX IF EXISTS \"idx_{table_id}_{name}\""));
+            alter_table_queries.push(format!("ALTER TABLE \"{table_id}\" DROP COLUMN \"{name}\""));
             alter_table_queries.push(format!(
-                "ALTER TABLE [{table_id}] ADD COLUMN [{name}] {sql_type}"
+                "ALTER TABLE \"{table_id}\" ADD COLUMN \"{name}\" {sql_type}"
             ));
             alter_table_queries.push(format!(
-                "UPDATE [{table_id}] SET [{name}] = (SELECT {sql_value} FROM [tmp_values_{name}] \
-             WHERE [tmp_values_{name}].internal_id = [{table_id}].internal_id)"
+                "UPDATE \"{table_id}\" SET \"{name}\" = (SELECT {sql_value} FROM \"tmp_values_{name}\" \
+             WHERE \"tmp_values_{name}\".internal_id = \"{table_id}\".internal_id)"
             ));
-            alter_table_queries.push(format!("DROP TABLE [tmp_values_{name}]"));
+            alter_table_queries.push(format!("DROP TABLE \"tmp_values_{name}\""));
             alter_table_queries.push(format!(
-                "CREATE INDEX IF NOT EXISTS [idx_{table_id}_{name}] ON [{table_id}] ([{name}]);"
+                "CREATE INDEX IF NOT EXISTS \"idx_{table_id}_{name}\" ON \"{table_id}\" (\"{name}\");"
             ));
         };
 
@@ -456,7 +456,7 @@ impl Sql {
                         alter_table_queries,
                         &column_name,
                         "TEXT",
-                        &format!("[{column_name}]"),
+                        &format!("\"{column_name}\""),
                     );
                 } else if schema_diff.is_some() {
                     alter_column(&column_name, "TEXT", indices);
@@ -482,7 +482,7 @@ impl Sql {
                     .join(", ");
 
                 let sql_type = format!(
-                "TEXT CONSTRAINT [{column_name}_check] CHECK([{column_name}] IN ({all_options}))"
+                "TEXT CONSTRAINT \"{column_name}_check\" CHECK(\"{column_name}\" IN ({all_options}))"
             );
 
                 // If new variants of an enum are added, without the enum itself being added through an upgrade
@@ -495,7 +495,7 @@ impl Sql {
                         alter_table_queries,
                         &column_name,
                         &sql_type,
-                        &format!("[{column_name}]"),
+                        &format!("\"{column_name}\""),
                     );
                 } else if enum_schema_diff.is_some() {
                     // In the case where the enum is being added to the model, we need to add the column and its constraints
@@ -548,7 +548,7 @@ impl Sql {
                         alter_table_queries,
                         &column_name,
                         "TEXT",
-                        &format!("[{column_name}]"),
+                        &format!("\"{column_name}\""),
                     );
                 } else if schema_diff.is_some() {
                     alter_column(&column_name, "TEXT", indices);

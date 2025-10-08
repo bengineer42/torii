@@ -68,7 +68,9 @@ where
         }) {
             WorldEvent::StoreUpdateRecord(e) => e,
             _ => {
-                unreachable!()
+                // This processor only handles StoreUpdateRecord events
+                // If we receive a different event type, skip processing
+                return Ok(());
             }
         };
 
@@ -107,7 +109,7 @@ where
                 // so we should get rid of them to avoid trying to deserialize them
                 struct_.children.retain(|field| !field.key);
             }
-            _ => unreachable!(),
+            _ => return Ok(()),
         }
 
         let mut values = event.values.to_vec();

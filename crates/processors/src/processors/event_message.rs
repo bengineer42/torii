@@ -74,7 +74,9 @@ where
         }) {
             WorldEvent::EventEmitted(e) => e,
             _ => {
-                unreachable!()
+                // This processor only handles EventEmitted events
+                // If we receive a different event type, skip processing
+                return Ok(());
             }
         };
 

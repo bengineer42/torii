@@ -48,7 +48,7 @@ where
                 &e.name.to_string().unwrap(),
             ),
             _ => {
-                unreachable!()
+                return 0;
             }
         };
 
@@ -68,7 +68,7 @@ where
         }) {
             WorldEvent::ModelWithSchemaRegistered(e) => e,
             _ => {
-                unreachable!()
+                return Ok(());
             }
         };
 

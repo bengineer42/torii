@@ -65,7 +65,9 @@ where
         }) {
             WorldEvent::StoreSetRecord(e) => e,
             _ => {
-                unreachable!()
+                // This processor only handles StoreSetRecord events
+                // If we receive a different event type, skip processing
+                return Ok(());
             }
         };
 

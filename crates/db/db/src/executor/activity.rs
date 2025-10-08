@@ -5,7 +5,7 @@ use tracing::info;
 
 use crate::executor::error::ExecutorQueryError;
 
-pub(crate) const LOG_TARGET: &str = "torii::sqlite::executor::activity";
+pub(crate) const LOG_TARGET: &str = "torii::postgres::executor::activity";
 
 pub type QueryResult<T> = std::result::Result<T, ExecutorQueryError>;
 
@@ -34,7 +34,7 @@ pub async fn update_activity(
     let last_session: Option<SessionData> = sqlx::query_as(
         "SELECT id, session_start, session_end, action_count, actions
          FROM activities
-         WHERE world_address = ? AND namespace = ? AND caller_address = ?
+         WHERE world_address = $1 AND namespace = $2 AND caller_address = $3
          ORDER BY session_end DESC
          LIMIT 1",
     )
@@ -62,11 +62,11 @@ pub async fn update_activity(
 
                 sqlx::query(
                     "UPDATE activities
-                     SET session_end = ?,
-                         action_count = ?,
-                         actions = ?,
+                     SET session_end = $1,
+                         action_count = $2,
+                         actions = $3,
                          updated_at = CURRENT_TIMESTAMP
-                     WHERE id = ?",
+                     WHERE id = $4",
                 )
                 .bind(executed_at)
                 .bind(new_action_count)
@@ -151,7 +151,7 @@ async fn create_new_session(
     sqlx::query(
         "INSERT INTO activities
          (id, world_address, namespace, caller_address, session_start, session_end, action_count, actions)
-         VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+         VALUES ($1, $2, $3, $4, $5, $6, 1, $7)",
     )
     .bind(&session_id)
     .bind(world_address)
@@ -194,7 +194,7 @@ pub async fn cleanup_old_activities(
 
     let result = sqlx::query(
         "DELETE FROM activities
-         WHERE session_end < ?",
+         WHERE session_end < $1",
     )
     .bind(cutoff_date)
     .execute(&mut **tx)

@@ -1,0 +1,18 @@
+rpc = "http://127.0.0.1:5050"
+db_dir = "~/ba-database/dev"
+
+[indexing]
+contracts = [
+    "erc721:0x1334ae48fdead3cc46eaa26a10a4f015a7304768e1741d28d84cf3e4eb88624",
+    "erc721:0x3e7e8feeffcce273f2a08b4616d5442adf52d1937f4c243dbe8534fd0372c56",
+    "erc721:0x1e2b4b72dbc5206682e6ee3823a83e6634c80eac934c5711edbc60fb186c2e7",
+    "contract:0x72ff2a05047ca1f6ff95d06f99f481d1d3e319bd1fbc5b32b37ca6621c67a6b",
+    "contract:0x461de2e17c8fe27f44224b3a888951ae6a64388effd1cf2a38ebe68adfe2e30",
+    "contract:0x717dd19d72f98696576a5d39bfae8ca57ed20c0dc8004b97f63e56fab5d8092",
+    "contract:0x26d4d094278a962f70b043bfb741d7f2dbc5d37df8c5a108a4bb22ec15c6bf",
+    "contract:0x4165c3d81f0356b29028e98333e1bd63d9edcad2b320f9d96bea333c38cfc7e",
+    "contract:0x2dc0ee5c7a5625592ad368a7f15e92dcf4087a1a170a85db73ba6ddcd7e0d43",
+    "contract:0x7fcb686a45b96bb19f748d33b6abde99a644390ed97e731920aca36c53e2fdb",
+    "contract:0x7e111d03984dc4c532b9df331d54ecef7c15fe18a6cc329e9c2c668bddc5f8a",
+    "contract:0x7fd1c8ff834a12054ec03251e35e2eaabc4455967109bad7bed719cf156e7f8",
+]

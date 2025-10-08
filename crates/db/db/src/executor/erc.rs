@@ -189,7 +189,7 @@ pub async fn store_token_attributes(
         // Store the attribute
         sqlx::query(
             "INSERT INTO token_attributes (id, token_id, trait_name, trait_value) 
-             VALUES (?, ?, ?, ?)",
+             VALUES ($1, $2, $3, $4)",
         )
         .bind(id)
         .bind(token_id)
@@ -451,7 +451,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
         // write the new balance to the database
         let token_balance: TokenBalance = sqlx::query_as(&format!(
             "INSERT INTO {TOKEN_BALANCE_TABLE} (id, contract_address, account_address, \
-             token_id, balance) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO UPDATE SET balance = EXCLUDED.balance RETURNING *",
+             token_id, balance) VALUES ($1, $2, $3, $4, $5) ON CONFLICT(id) DO UPDATE SET balance = EXCLUDED.balance RETURNING *",
         ))
         .bind(id.to_string())
         .bind(felt_to_sql_string(&id.token_id.contract_address()))

@@ -11,14 +11,14 @@ use katana_runner::RunnerCtx;
 use num_traits::ToPrimitive;
 use scarb_interop::Profile;
 use scarb_metadata_ext::MetadataDojoExt;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use starknet::accounts::Account;
 use starknet::core::types::{BlockId, BlockTag, Call, Felt, FunctionCall, U256};
 use starknet::core::utils::get_selector_from_name;
 use starknet::providers::jsonrpc::HttpTransport;
 use starknet::providers::{JsonRpcClient, Provider};
 use starknet_crypto::poseidon_hash_many;
-use tempfile::NamedTempFile;
+// PostgreSQL tests use actual database connection
 use tokio::sync::broadcast;
 use torii_cache::{Cache, InMemoryCache};
 use torii_db::executor::Executor;

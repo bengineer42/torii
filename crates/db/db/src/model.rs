@@ -203,7 +203,7 @@ impl ModelReader<Error> for ModelSQLReader {
     }
 }
 
-/// Populate the values of a Ty (schema) from SQLite row.
+/// Populate the values of a Ty (schema) from PostgreSQL row.
 pub fn map_row_to_ty(
     path: &str,
     name: &str,
@@ -910,7 +910,7 @@ impl Sql {
                 ),
             ];
 
-            // Join to entities table - SQLite will use idx_entities_event_id_id for ordering
+            // Join to entities table - PostgreSQL will use idx_entities_event_id_id for ordering
             query_builder = query_builder.join(&format!(
                 "JOIN {table_name} ON {model_relation_table}.entity_id = {table_name}.id",
             ));
@@ -1560,7 +1560,7 @@ mod tests {
         let (where_clause, bind_values) =
             build_composite_clause("entities", "entity_model", &composite, false).unwrap();
 
-        // SQLite json_extract returns NULL for out-of-bounds access
+        // PostgreSQL JSON operators return NULL for out-of-bounds access
         // This should still generate valid SQL, but will return NULL = 100 (which is false)
         assert_eq!(
             where_clause,
