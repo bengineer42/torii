@@ -82,7 +82,7 @@ where
 
         // If the model does not exist, silently ignore it.
         // This can happen if only specific namespaces are indexed.
-        let model = match ctx.cache.model(event.selector).await {
+        let model = match ctx.cache.model(ctx.contract_address, event.selector).await {
             Ok(m) => m,
             Err(e) if e.to_string().contains("no rows") && !ctx.config.namespaces.is_empty() => {
                 debug!(
@@ -135,6 +135,7 @@ where
 
         ctx.storage
             .set_entity(
+                ctx.contract_address,
                 wrapped_ty,
                 &ctx.event_id,
                 ctx.block_timestamp,

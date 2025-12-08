@@ -12,14 +12,15 @@ use starknet::core::types::U256;
 use starknet_crypto::{poseidon_hash_many, Felt};
 use torii_math::I256;
 use torii_proto::{
-    schema::Entity, CallType, Clause, CompositeClause, Contract, ContractCursor, ContractQuery,
-    Controller, ControllerQuery, Event, EventQuery, LogicalOperator, Model, OrderBy,
-    OrderDirection, Page, Query, Token, TokenBalance, TokenBalanceQuery, TokenContract,
-    TokenContractQuery, TokenQuery, TokenTransfer, TokenTransferQuery, Transaction,
-    TransactionCall, TransactionQuery,
+    schema::Entity, Activity, ActivityQuery, AggregationEntry, AggregationQuery, BalanceId,
+    CallType, Clause, CompositeClause, Contract, ContractCursor, ContractQuery, Controller,
+    ControllerQuery, Event, EventQuery, LogicalOperator, Model, OrderBy, OrderDirection, Page,
+    Query, SearchMatch, SearchQuery, SearchResponse, TableSearchResults, Token, TokenBalance,
+    TokenBalanceQuery, TokenContract, TokenContractQuery, TokenId, TokenQuery, TokenTransfer,
+    TokenTransferQuery, Transaction, TransactionCall, TransactionQuery,
 };
 use torii_sqlite_types::{HookEvent, Model as SQLModel};
-use torii_storage::{ReadOnlyStorage, Storage, StorageError};
+use torii_storage::{utils::format_world_scoped_id, ReadOnlyStorage, Storage, StorageError};
 use tracing::warn;
 
 use crate::{
@@ -39,10 +40,7 @@ use crate::{
         error::ExecutorQueryError, ApplyBalanceDiffQuery, Argument, DeleteEntityQuery, EntityQuery,
         EventMessageQuery, QueryMessage, QueryType, StoreTransactionQuery, UpdateCursorsQuery,
     },
-    utils::{
-        felt_and_u256_to_sql_string, felt_to_sql_string, felts_to_sql_string,
-        utc_dt_string_from_timestamp,
-    },
+    utils::{felt_to_sql_string, felts_to_sql_string, utc_dt_string_from_timestamp},
     Sql,
 };
 
@@ -55,9 +53,9 @@ impl ReadOnlyStorage for Sql {
     }
 
     /// Returns the model metadata for the storage.
-    async fn model(&self, selector: Felt) -> Result<Model, StorageError> {
+    async fn model(&self, world_address: Felt, selector: Felt) -> Result<Model, StorageError> {
         if let Some(cache) = &self.cache {
-            if let Ok(model) = cache.model(selector).await {
+            if let Ok(model) = cache.model(world_address, selector).await {
                 return Ok(model);
             } else {
                 warn!(
@@ -69,41 +67,32 @@ impl ReadOnlyStorage for Sql {
         }
 
         let model = sqlx::query_as::<_, SQLModel>("SELECT * FROM models WHERE id = ?")
-            .bind(format!("{:#x}", selector))
+            .bind(format_world_scoped_id(&world_address, &selector))
             .fetch_one(&self.pool)
             .await?;
-
-        let layout = serde_json::from_str(&model.layout)
-            .map_err(|e| Error::Parse(ParseError::FromJsonStr(e)))?;
-        let schema = serde_json::from_str(&model.schema)
-            .map_err(|e| Error::Parse(ParseError::FromJsonStr(e)))?;
-
-        let model_metadata = Model {
-            selector: Felt::from_str(&model.id)?,
-            name: model.name,
-            namespace: model.namespace,
-            schema,
-            packed_size: model.packed_size,
-            unpacked_size: model.unpacked_size,
-            class_hash: Felt::from_str(&model.class_hash)?,
-            contract_address: Felt::from_str(&model.contract_address)?,
-            layout,
-            use_legacy_store: model.legacy_store,
-        };
+        let model: torii_proto::Model = model.into();
 
         // Update cache to prevent repeated cache misses
         if let Some(cache) = &self.cache {
-            cache.register_model(selector, model_metadata.clone()).await;
+            cache
+                .register_model(world_address, selector, model.clone())
+                .await;
         }
 
-        Ok(model_metadata)
+        Ok(model)
     }
 
     /// Returns the models for the storage.
-    /// If selectors is empty, returns all models.
-    async fn models(&self, selectors: &[Felt]) -> Result<Vec<Model>, StorageError> {
+    /// If world_addresses is empty, returns models from all worlds.
+    /// If selectors is empty, returns all models from the specified worlds.
+    async fn models(
+        &self,
+        world_addresses: &[Felt],
+        selectors: &[Felt],
+    ) -> Result<Vec<Model>, StorageError> {
+        // Try cache first
         if let Some(cache) = &self.cache {
-            if let Ok(models) = cache.models(selectors).await {
+            if let Ok(models) = cache.models(world_addresses, selectors).await {
                 return Ok(models);
             } else {
                 warn!(
@@ -114,58 +103,73 @@ impl ReadOnlyStorage for Sql {
             }
         }
 
-        let mut query = "SELECT * FROM models".to_string();
-        let mut bind_values = vec![];
-        if !selectors.is_empty() {
-            let placeholders = vec!["?"; selectors.len()].join(", ");
-            query += &format!(" WHERE id IN ({})", placeholders);
-            bind_values.extend(selectors.iter().map(|s| format!("{:#x}", s)));
+        // Build SQL query for multiple worlds
+        let mut query = String::from("SELECT * FROM models");
+        let mut bind_values = Vec::new();
+        let mut conditions = Vec::new();
+
+        // Add world address filter
+        if !world_addresses.is_empty() {
+            let placeholders = vec!["?"; world_addresses.len()].join(", ");
+            conditions.push(format!("world_address IN ({})", placeholders));
+            bind_values.extend(world_addresses.iter().map(felt_to_sql_string));
         }
 
+        // Add selector filter if specified
+        if !selectors.is_empty() {
+            let placeholders = vec!["?"; selectors.len()].join(", ");
+            conditions.push(format!("model_selector IN ({})", placeholders));
+            bind_values.extend(selectors.iter().map(felt_to_sql_string));
+        }
+
+        // Add WHERE clause if we have any conditions
+        if !conditions.is_empty() {
+            query.push_str(" WHERE ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        // Execute query
         let mut query = sqlx::query_as::<_, SQLModel>(&query);
         for value in bind_values {
             query = query.bind(value);
         }
-        let models = query.fetch_all(&self.pool).await?;
-
-        let mut models_metadata = Vec::with_capacity(models.len());
-        for model in models {
-            let layout = serde_json::from_str(&model.layout)
-                .map_err(|e| Error::Parse(ParseError::FromJsonStr(e)))?;
-            let schema = serde_json::from_str(&model.schema)
-                .map_err(|e| Error::Parse(ParseError::FromJsonStr(e)))?;
-
-            let model_metadata = Model {
-                selector: Felt::from_str(&model.id)?,
-                name: model.name,
-                namespace: model.namespace,
-                schema,
-                packed_size: model.packed_size,
-                unpacked_size: model.unpacked_size,
-                class_hash: Felt::from_str(&model.class_hash)?,
-                contract_address: Felt::from_str(&model.contract_address)?,
-                layout,
-                use_legacy_store: model.legacy_store,
-            };
-
-            models_metadata.push(model_metadata);
-        }
+        let models: Vec<torii_proto::Model> = query
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .map(|m| m.into())
+            .collect();
 
         // Update cache to prevent repeated cache misses
         if let Some(cache) = &self.cache {
-            for model in &models_metadata {
-                cache.register_model(model.selector, model.clone()).await;
+            for model in &models {
+                cache
+                    .register_model(model.world_address, model.selector, model.clone())
+                    .await;
             }
         }
 
-        Ok(models_metadata)
+        Ok(models)
     }
 
-    async fn token_ids(&self) -> Result<HashSet<String>, StorageError> {
+    async fn token_ids(&self) -> Result<HashSet<TokenId>, StorageError> {
         let token_ids = sqlx::query_scalar::<_, String>("SELECT id FROM tokens")
             .fetch_all(&self.pool)
             .await?;
-        Ok(token_ids.into_iter().collect())
+        Ok(token_ids
+            .into_iter()
+            .map(|id| {
+                let parts = id.split(':').collect::<Vec<&str>>();
+                if parts.len() == 2 {
+                    TokenId::Nft(
+                        Felt::from_str(parts[0]).unwrap(),
+                        crypto_bigint::U256::from_be_hex(parts[1].trim_start_matches("0x")).into(),
+                    )
+                } else {
+                    TokenId::Contract(Felt::from_str(parts[0]).unwrap())
+                }
+            })
+            .collect())
     }
 
     /// Returns the controllers for the storage.
@@ -226,12 +230,7 @@ impl ReadOnlyStorage for Sql {
         if !query.contract_addresses.is_empty() {
             let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
             conditions.push(format!("contract_address IN ({})", placeholders));
-            bind_values.extend(
-                query
-                    .contract_addresses
-                    .iter()
-                    .map(|addr| format!("{:#x}", addr)),
-            );
+            bind_values.extend(query.contract_addresses.iter().map(felt_to_sql_string));
         }
 
         if !query.contract_types.is_empty() {
@@ -264,7 +263,7 @@ impl ReadOnlyStorage for Sql {
         let executor = PaginationExecutor::new(self.pool.clone());
         let mut query_builder = QueryBuilder::new("tokens")
             .alias("t")
-            .select(&["t.*".to_string()]);
+            .select(&["t.*".to_string(), "t.id as ordering".to_string()]);
 
         let mut join_conditions = Vec::new();
         let mut where_conditions = Vec::new();
@@ -276,7 +275,7 @@ impl ReadOnlyStorage for Sql {
             let placeholders = vec!["?"; query.contract_addresses.len()].join(", ");
             where_conditions.push(format!("t.contract_address IN ({})", placeholders));
             for addr in &query.contract_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
         }
 
@@ -319,7 +318,7 @@ impl ReadOnlyStorage for Sql {
                 query_builder,
                 &query.pagination,
                 &OrderBy {
-                    field: "id".to_string(),
+                    field: "ordering".to_string(),
                     direction: OrderDirection::Desc,
                 },
             )
@@ -349,7 +348,7 @@ impl ReadOnlyStorage for Sql {
             query_builder =
                 query_builder.where_clause(&format!("account_address IN ({})", placeholders));
             for addr in &query.account_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
         }
 
@@ -358,7 +357,7 @@ impl ReadOnlyStorage for Sql {
             query_builder =
                 query_builder.where_clause(&format!("contract_address IN ({})", placeholders));
             for addr in &query.contract_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
         }
 
@@ -427,6 +426,7 @@ impl ReadOnlyStorage for Sql {
                     LIMIT 1
                 ), '') as token_metadata"
                     .to_string(),
+                "t.contract_address as ordering".to_string(),
             ])
             .join("JOIN contracts c ON c.contract_address = t.contract_address")
             .where_clause("t.token_id = '' OR t.token_id IS NULL");
@@ -436,7 +436,7 @@ impl ReadOnlyStorage for Sql {
             query_builder =
                 query_builder.where_clause(&format!("t.contract_address IN ({})", placeholders));
             for addr in &query.contract_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
         }
 
@@ -454,7 +454,7 @@ impl ReadOnlyStorage for Sql {
                 query_builder,
                 &query.pagination,
                 &OrderBy {
-                    field: "contract_address".to_string(),
+                    field: "ordering".to_string(),
                     direction: OrderDirection::Desc,
                 },
             )
@@ -503,7 +503,7 @@ impl ReadOnlyStorage for Sql {
                 query_builder = query_builder
                     .where_clause(&format!("t.transaction_hash IN ({})", placeholders));
                 for hash in &filter.transaction_hashes {
-                    query_builder = query_builder.bind_value(format!("{:#x}", hash));
+                    query_builder = query_builder.bind_value(felt_to_sql_string(hash));
                 }
             }
 
@@ -521,7 +521,7 @@ impl ReadOnlyStorage for Sql {
                     let placeholders = vec!["?"; filter.contract_addresses.len()].join(", ");
                     call_conditions.push(format!("tc.contract_address IN ({})", placeholders));
                     for addr in &filter.contract_addresses {
-                        query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                        query_builder = query_builder.bind_value(felt_to_sql_string(addr));
                     }
                 }
 
@@ -537,7 +537,7 @@ impl ReadOnlyStorage for Sql {
                     let placeholders = vec!["?"; filter.caller_addresses.len()].join(", ");
                     call_conditions.push(format!("tc.caller_address IN ({})", placeholders));
                     for caller in &filter.caller_addresses {
-                        query_builder = query_builder.bind_value(format!("{:#x}", caller));
+                        query_builder = query_builder.bind_value(felt_to_sql_string(caller));
                     }
                 }
 
@@ -554,7 +554,7 @@ impl ReadOnlyStorage for Sql {
                 query_builder =
                     query_builder.where_clause(&format!("tm.model_id IN ({})", placeholders));
                 for model in &filter.model_selectors {
-                    query_builder = query_builder.bind_value(format!("{:#x}", model));
+                    query_builder = query_builder.bind_value(felt_to_sql_string(model));
                 }
             }
 
@@ -683,10 +683,10 @@ impl ReadOnlyStorage for Sql {
                 placeholders_from, placeholders_to
             ));
             for addr in &query.account_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
             for addr in &query.account_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
         }
 
@@ -695,7 +695,7 @@ impl ReadOnlyStorage for Sql {
             query_builder =
                 query_builder.where_clause(&format!("contract_address IN ({})", placeholders));
             for addr in &query.contract_addresses {
-                query_builder = query_builder.bind_value(format!("{:#x}", addr));
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
             }
         }
 
@@ -774,6 +774,7 @@ impl ReadOnlyStorage for Sql {
                 query.no_hashed_keys,
                 query.models.clone(),
                 query.historical,
+                &query.world_addresses,
             )
             .await?;
 
@@ -815,6 +816,7 @@ impl ReadOnlyStorage for Sql {
                 query.no_hashed_keys,
                 query.models.clone(),
                 query.historical,
+                &query.world_addresses,
             )
             .await?;
 
@@ -824,13 +826,14 @@ impl ReadOnlyStorage for Sql {
     /// Returns the model data of an entity.
     async fn entity_model(
         &self,
+        world_address: Felt,
         entity_id: Felt,
         model_selector: Felt,
     ) -> Result<Option<Ty>, StorageError> {
-        let mut schema = self.model(model_selector).await?.schema;
+        let mut schema = self.model(world_address, model_selector).await?.schema;
         let query = format!("SELECT * FROM [{}] WHERE internal_id = ?", schema.name());
         let mut query = sqlx::query(&query);
-        query = query.bind(format!("{:#066x}", entity_id));
+        query = query.bind(format_world_scoped_id(&world_address, &entity_id));
         let row: Option<SqliteRow> = query.fetch_optional(&self.pool).await?;
         match row {
             Some(row) => {
@@ -839,6 +842,853 @@ impl ReadOnlyStorage for Sql {
             }
             None => Ok(None),
         }
+    }
+
+    /// Returns aggregations for the storage with calculated positions.
+    async fn aggregations(
+        &self,
+        query: &AggregationQuery,
+    ) -> Result<Page<AggregationEntry>, StorageError> {
+        let executor = PaginationExecutor::new(self.pool.clone());
+
+        // Use window function to calculate positions on-the-fly
+        let mut query_builder = QueryBuilder::new("aggregations").alias("a").select(&[
+            "a.id".to_string(),
+            "a.aggregator_id".to_string(),
+            "a.entity_id".to_string(),
+            "a.value".to_string(),
+            "a.display_value".to_string(),
+            "a.model_id".to_string(),
+            "a.created_at".to_string(),
+            "a.updated_at".to_string(),
+            // Calculate position using ROW_NUMBER() window function
+            // Partitioned by aggregator_id and ordered by value DESC
+            "ROW_NUMBER() OVER (PARTITION BY a.aggregator_id ORDER BY a.value DESC) as position"
+                .to_string(),
+        ]);
+
+        if !query.aggregator_ids.is_empty() {
+            let placeholders = vec!["?"; query.aggregator_ids.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("a.aggregator_id IN ({})", placeholders));
+            for aggregator_id in &query.aggregator_ids {
+                query_builder = query_builder.bind_value(aggregator_id.clone());
+            }
+        }
+
+        if !query.entity_ids.is_empty() {
+            let placeholders = vec!["?"; query.entity_ids.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("a.entity_id IN ({})", placeholders));
+            for entity_id in &query.entity_ids {
+                query_builder = query_builder.bind_value(entity_id.clone());
+            }
+        }
+
+        let page = executor
+            .execute_paginated_query(
+                query_builder,
+                &query.pagination,
+                &OrderBy {
+                    field: "position".to_string(),
+                    direction: OrderDirection::Asc,
+                },
+            )
+            .await?;
+
+        let items: Vec<AggregationEntry> = page
+            .items
+            .into_iter()
+            .map(|row| {
+                let aggregation = torii_sqlite_types::AggregationEntryWithPosition::from_row(&row)?;
+                Result::<AggregationEntry, Error>::Ok(aggregation.into())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Page {
+            items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    /// Returns activities for the storage.
+    async fn activities(&self, query: &ActivityQuery) -> Result<Page<Activity>, StorageError> {
+        let executor = PaginationExecutor::new(self.pool.clone());
+        let mut query_builder = QueryBuilder::new("activities").select(&[
+            "id".to_string(),
+            "world_address".to_string(),
+            "namespace".to_string(),
+            "caller_address".to_string(),
+            "session_start".to_string(),
+            "session_end".to_string(),
+            "action_count".to_string(),
+            "actions".to_string(),
+            "updated_at".to_string(),
+        ]);
+
+        if !query.world_addresses.is_empty() {
+            let placeholders = vec!["?"; query.world_addresses.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("world_address IN ({})", placeholders));
+            for addr in &query.world_addresses {
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
+            }
+        }
+
+        if !query.namespaces.is_empty() {
+            let placeholders = vec!["?"; query.namespaces.len()].join(", ");
+            query_builder = query_builder.where_clause(&format!("namespace IN ({})", placeholders));
+            for namespace in &query.namespaces {
+                query_builder = query_builder.bind_value(namespace.clone());
+            }
+        }
+
+        if !query.caller_addresses.is_empty() {
+            let placeholders = vec!["?"; query.caller_addresses.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("caller_address IN ({})", placeholders));
+            for addr in &query.caller_addresses {
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
+            }
+        }
+
+        if let Some(from_time) = &query.from_time {
+            query_builder = query_builder.where_clause("session_end >= ?");
+            query_builder = query_builder.bind_value(from_time.to_rfc3339());
+        }
+
+        if let Some(to_time) = &query.to_time {
+            query_builder = query_builder.where_clause("session_end <= ?");
+            query_builder = query_builder.bind_value(to_time.to_rfc3339());
+        }
+
+        let page = executor
+            .execute_paginated_query(
+                query_builder,
+                &query.pagination,
+                &OrderBy {
+                    field: "session_end".to_string(),
+                    direction: OrderDirection::Desc,
+                },
+            )
+            .await?;
+        let items: Vec<Activity> = page
+            .items
+            .into_iter()
+            .map(|row| {
+                Result::<Activity, Error>::Ok(torii_sqlite_types::Activity::from_row(&row)?.into())
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Page {
+            items,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    /// Returns achievements with optional filtering by world, namespace, and hidden status.
+    async fn achievements(
+        &self,
+        query: &torii_proto::AchievementQuery,
+    ) -> Result<Page<torii_proto::Achievement>, StorageError> {
+        let executor = PaginationExecutor::new(self.pool.clone());
+        let mut query_builder = QueryBuilder::new("achievements").select(&[
+            "id".to_string(),
+            "world_address".to_string(),
+            "namespace".to_string(),
+            "entity_id".to_string(),
+            "hidden".to_string(),
+            "index_num".to_string(),
+            "points".to_string(),
+            "start".to_string(),
+            "end".to_string(),
+            "group_name".to_string(),
+            "icon".to_string(),
+            "title".to_string(),
+            "description".to_string(),
+            "tasks".to_string(),
+            "data".to_string(),
+            "total_completions".to_string(),
+            "completion_rate".to_string(),
+            "created_at".to_string(),
+            "updated_at".to_string(),
+        ]);
+
+        if !query.world_addresses.is_empty() {
+            let placeholders = vec!["?"; query.world_addresses.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("world_address IN ({})", placeholders));
+            for addr in &query.world_addresses {
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
+            }
+        }
+
+        if !query.namespaces.is_empty() {
+            let placeholders = vec!["?"; query.namespaces.len()].join(", ");
+            query_builder = query_builder.where_clause(&format!("namespace IN ({})", placeholders));
+            for namespace in &query.namespaces {
+                query_builder = query_builder.bind_value(namespace.clone());
+            }
+        }
+
+        if let Some(hidden) = query.hidden {
+            query_builder = query_builder.where_clause("hidden = ?");
+            query_builder = query_builder.bind_value(if hidden {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            });
+        }
+
+        let page = executor
+            .execute_paginated_query(
+                query_builder,
+                &query.pagination,
+                &OrderBy {
+                    field: "index_num".to_string(),
+                    direction: OrderDirection::Asc,
+                },
+            )
+            .await?;
+
+        // For each achievement, fetch its tasks
+        let mut achievements = Vec::new();
+        for row in page.items {
+            let achievement = torii_sqlite_types::Achievement::from_row(&row)?;
+            let achievement_id = achievement.id.clone();
+
+            // Fetch tasks for this achievement
+            let tasks: Vec<torii_sqlite_types::AchievementTask> = sqlx::query_as(
+                "SELECT id, achievement_id, task_id, world_address, namespace, description, total, 
+                 total_completions, completion_rate, created_at 
+                 FROM achievement_tasks 
+                 WHERE achievement_id = ? 
+                 ORDER BY created_at ASC",
+            )
+            .bind(&achievement_id)
+            .fetch_all(&self.pool)
+            .await?;
+
+            // Convert to proto types (simplified, no redundant fields)
+            let proto_tasks: Vec<torii_proto::AchievementTask> = tasks
+                .into_iter()
+                .map(|t| torii_proto::AchievementTask {
+                    task_id: t.task_id,
+                    description: t.description,
+                    total: t.total as u32,
+                    total_completions: t.total_completions as u32,
+                    completion_rate: t.completion_rate,
+                    created_at: t.created_at,
+                })
+                .collect();
+
+            // Calculate total completions and completion rate from tasks
+            let (total_completions, avg_completion_rate) = if !proto_tasks.is_empty() {
+                let sum_completions: u32 = proto_tasks.iter().map(|t| t.total_completions).sum();
+                let sum_rate: f64 = proto_tasks.iter().map(|t| t.completion_rate).sum();
+                (
+                    sum_completions / proto_tasks.len() as u32,
+                    sum_rate / proto_tasks.len() as f64,
+                )
+            } else {
+                (0, 0.0)
+            };
+
+            achievements.push(torii_proto::Achievement {
+                id: achievement.id.clone(),
+                world_address: Felt::from_str(&achievement.world_address)
+                    .map_err(|e| Error::Parse(ParseError::FromStr(e)))?,
+                namespace: achievement
+                    .id
+                    .split(':')
+                    .nth(1)
+                    .unwrap_or_default()
+                    .to_string(),
+                entity_id: achievement
+                    .id
+                    .split(':')
+                    .next_back()
+                    .unwrap_or_default()
+                    .to_string(),
+                hidden: achievement.hidden != 0,
+                index: achievement.index_num as u32,
+                points: achievement.points as u32,
+                start: achievement.start,
+                end: achievement.end,
+                group: achievement.group_name,
+                icon: achievement.icon,
+                title: achievement.title,
+                description: achievement.description,
+                tasks: proto_tasks,
+                data: achievement.data,
+                total_completions,
+                completion_rate: avg_completion_rate,
+                created_at: achievement.created_at,
+                updated_at: achievement.updated_at,
+            });
+        }
+
+        Ok(Page {
+            items: achievements,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    /// Returns player achievement data grouped by player globally (across all worlds/namespaces).
+    /// Empty arrays mean no filter is applied for that dimension.
+    /// Results are paginated based on unique players (aggregated from player_achievements table).
+    async fn player_achievements(
+        &self,
+        query: &torii_proto::PlayerAchievementQuery,
+    ) -> Result<Page<torii_proto::PlayerAchievementEntry>, StorageError> {
+        use std::collections::HashMap;
+
+        let executor = PaginationExecutor::new(self.pool.clone());
+
+        // Step 1: Build paginated query for player stats grouped by player_id
+        let mut query_builder = QueryBuilder::new("player_achievements").select(&[
+            "player_id".to_string(),
+            "SUM(total_points) as total_points".to_string(),
+            "SUM(completed_achievements) as completed_achievements".to_string(),
+            "SUM(total_achievements) as total_achievements".to_string(),
+            "AVG(completion_percentage) as completion_percentage".to_string(),
+            "MAX(last_achievement_at) as last_achievement_at".to_string(),
+            "MIN(created_at) as created_at".to_string(),
+            "MAX(updated_at) as updated_at".to_string(),
+        ]);
+
+        if !query.world_addresses.is_empty() {
+            let placeholders = vec!["?"; query.world_addresses.len()].join(", ");
+            query_builder =
+                query_builder.where_clause(&format!("world_address IN ({})", placeholders));
+            for addr in &query.world_addresses {
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
+            }
+        }
+
+        if !query.namespaces.is_empty() {
+            let placeholders = vec!["?"; query.namespaces.len()].join(", ");
+            query_builder = query_builder.where_clause(&format!("namespace IN ({})", placeholders));
+            for namespace in &query.namespaces {
+                query_builder = query_builder.bind_value(namespace.clone());
+            }
+        }
+
+        if !query.player_addresses.is_empty() {
+            let placeholders = vec!["?"; query.player_addresses.len()].join(", ");
+            query_builder = query_builder.where_clause(&format!("player_id IN ({})", placeholders));
+            for addr in &query.player_addresses {
+                query_builder = query_builder.bind_value(felt_to_sql_string(addr));
+            }
+        }
+
+        query_builder = query_builder.group_by("player_id");
+
+        let page = executor
+            .execute_paginated_query(
+                query_builder,
+                &query.pagination,
+                &OrderBy {
+                    field: "total_points".to_string(),
+                    direction: OrderDirection::Desc,
+                },
+            )
+            .await?;
+
+        struct AggregatedPlayerStats {
+            player_id: String,
+            total_points: i32,
+            completed_achievements: i32,
+            total_achievements: i32,
+            completion_percentage: f64,
+            last_achievement_at: Option<String>,
+            created_at: String,
+            updated_at: String,
+        }
+
+        let aggregated_stats: Vec<AggregatedPlayerStats> = page
+            .items
+            .into_iter()
+            .map(|row| {
+                Ok(AggregatedPlayerStats {
+                    player_id: row.try_get("player_id")?,
+                    total_points: row.try_get("total_points")?,
+                    completed_achievements: row.try_get("completed_achievements")?,
+                    total_achievements: row.try_get("total_achievements")?,
+                    completion_percentage: row.try_get("completion_percentage")?,
+                    last_achievement_at: row.try_get("last_achievement_at").ok(),
+                    created_at: row.try_get("created_at")?,
+                    updated_at: row.try_get("updated_at")?,
+                })
+            })
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+        if aggregated_stats.is_empty() {
+            return Ok(Page {
+                items: vec![],
+                next_cursor: page.next_cursor,
+            });
+        }
+
+        // Step 2: Get all player_achievements rows for these players (to know which worlds/namespaces they have)
+        let player_ids: Vec<String> = aggregated_stats
+            .iter()
+            .map(|s| s.player_id.clone())
+            .collect();
+
+        let mut world_namespace_query = "SELECT DISTINCT world_address, namespace FROM player_achievements WHERE player_id IN (".to_string();
+        world_namespace_query.push_str(&vec!["?"; player_ids.len()].join(", "));
+        world_namespace_query.push(')');
+
+        // Apply world/namespace filters if specified
+        if !query.world_addresses.is_empty() {
+            world_namespace_query.push_str(" AND world_address IN (");
+            world_namespace_query.push_str(&vec!["?"; query.world_addresses.len()].join(", "));
+            world_namespace_query.push(')');
+        }
+        if !query.namespaces.is_empty() {
+            world_namespace_query.push_str(" AND namespace IN (");
+            world_namespace_query.push_str(&vec!["?"; query.namespaces.len()].join(", "));
+            world_namespace_query.push(')');
+        }
+
+        let mut wn_query = sqlx::query_as::<_, (String, String)>(&world_namespace_query);
+        for player_id in &player_ids {
+            wn_query = wn_query.bind(player_id);
+        }
+        if !query.world_addresses.is_empty() {
+            for addr in &query.world_addresses {
+                wn_query = wn_query.bind(felt_to_sql_string(addr));
+            }
+        }
+        if !query.namespaces.is_empty() {
+            for namespace in &query.namespaces {
+                wn_query = wn_query.bind(namespace);
+            }
+        }
+
+        let world_namespace_pairs: Vec<(String, String)> = wn_query.fetch_all(&self.pool).await?;
+
+        // Step 3: Fetch all achievements and tasks in ONE query using JOIN
+        // This is more efficient than separate queries for achievements and tasks
+        let mut achievements_with_tasks: HashMap<
+            (String, String),
+            Vec<(
+                torii_sqlite_types::Achievement,
+                Vec<torii_sqlite_types::AchievementTask>,
+            )>,
+        > = HashMap::new();
+
+        for (world_address, namespace) in &world_namespace_pairs {
+            // Get all achievements
+            let achievements: Vec<torii_sqlite_types::Achievement> = sqlx::query_as(
+                "SELECT id, world_address, hidden, index_num, points, start, end, group_name, 
+                 icon, title, description, tasks, data, created_at, updated_at 
+                 FROM achievements 
+                 WHERE world_address = ? AND namespace = ? 
+                 ORDER BY index_num ASC",
+            )
+            .bind(world_address)
+            .bind(namespace)
+            .fetch_all(&self.pool)
+            .await?;
+
+            let mut ach_with_tasks = Vec::new();
+
+            for achievement in achievements {
+                // Get tasks for this achievement
+                let tasks: Vec<torii_sqlite_types::AchievementTask> = sqlx::query_as(
+                    "SELECT id, achievement_id, task_id, world_address, namespace, description, total, 
+                     total_completions, completion_rate, created_at 
+                     FROM achievement_tasks 
+                     WHERE achievement_id = ? 
+                     ORDER BY created_at ASC",
+                )
+                .bind(&achievement.id)
+                .fetch_all(&self.pool)
+                .await?;
+
+                ach_with_tasks.push((achievement, tasks));
+            }
+
+            achievements_with_tasks
+                .insert((world_address.clone(), namespace.clone()), ach_with_tasks);
+        }
+
+        // Step 4: Fetch all progressions for all players in this page
+        let mut progressions_map: HashMap<String, Vec<torii_sqlite_types::AchievementProgression>> =
+            HashMap::new();
+
+        if !aggregated_stats.is_empty() {
+            let mut progressions_sql =
+                "SELECT id, task_id, world_address, namespace, player_id, count, 
+                 completed, completed_at, created_at, updated_at 
+                 FROM achievement_progressions 
+                 WHERE player_id IN ("
+                    .to_string();
+            progressions_sql.push_str(&vec!["?"; player_ids.len()].join(", "));
+            progressions_sql.push(')');
+
+            // Apply world/namespace filters if specified
+            if !query.world_addresses.is_empty() {
+                progressions_sql.push_str(" AND world_address IN (");
+                progressions_sql.push_str(&vec!["?"; query.world_addresses.len()].join(", "));
+                progressions_sql.push(')');
+            }
+            if !query.namespaces.is_empty() {
+                progressions_sql.push_str(" AND namespace IN (");
+                progressions_sql.push_str(&vec!["?"; query.namespaces.len()].join(", "));
+                progressions_sql.push(')');
+            }
+
+            let mut prog_query =
+                sqlx::query_as::<_, torii_sqlite_types::AchievementProgression>(&progressions_sql);
+            for player_id in &player_ids {
+                prog_query = prog_query.bind(player_id);
+            }
+            if !query.world_addresses.is_empty() {
+                for addr in &query.world_addresses {
+                    prog_query = prog_query.bind(felt_to_sql_string(addr));
+                }
+            }
+            if !query.namespaces.is_empty() {
+                for namespace in &query.namespaces {
+                    prog_query = prog_query.bind(namespace);
+                }
+            }
+
+            let all_progressions = prog_query.fetch_all(&self.pool).await?;
+            for prog in all_progressions {
+                // Key by player_id only since we're grouping globally
+                progressions_map
+                    .entry(prog.player_id.clone())
+                    .or_default()
+                    .push(prog);
+            }
+        }
+
+        // Step 5: Build the response by combining all data (grouped by player globally)
+        let mut player_entries = Vec::new();
+
+        for stats in aggregated_stats {
+            let player_address = Felt::from_str(&stats.player_id)
+                .map_err(|e| Error::Parse(ParseError::FromStr(e)))?;
+
+            // Parse dates
+            let last_achievement_at = stats.last_achievement_at.as_deref().and_then(|s| {
+                DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc))
+            });
+            let created_at = DateTime::parse_from_rfc3339(&stats.created_at)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
+            let updated_at = DateTime::parse_from_rfc3339(&stats.updated_at)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or_else(Utc::now);
+
+            let stats_proto = torii_proto::PlayerAchievementStats {
+                total_points: stats.total_points as u32,
+                completed_achievements: stats.completed_achievements as u32,
+                total_achievements: stats.total_achievements as u32,
+                completion_percentage: stats.completion_percentage,
+                last_achievement_at,
+                created_at,
+                updated_at,
+            };
+
+            // Get all progressions for this player (across all worlds/namespaces)
+            let player_progressions = progressions_map
+                .get(&stats.player_id)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut achievement_progress = Vec::new();
+
+            // Iterate through all world/namespace pairs and build achievement progress
+            for (world_address_str, namespace) in &world_namespace_pairs {
+                let achievements_with_tasks_list = achievements_with_tasks
+                    .get(&(world_address_str.clone(), namespace.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+
+                for (achievement, tasks) in achievements_with_tasks_list {
+                    // Build task progress (just references with count/completed)
+                    let mut task_progress = Vec::new();
+                    let mut completed_tasks = 0;
+
+                    for task in &tasks {
+                        let progression = player_progressions
+                            .iter()
+                            .find(|p| p.task_id == task.task_id);
+
+                        let (count, completed) = if let Some(p) = progression {
+                            if p.completed != 0 {
+                                completed_tasks += 1;
+                            }
+                            (p.count as u32, p.completed != 0)
+                        } else {
+                            (0, false)
+                        };
+
+                        task_progress.push(torii_proto::TaskProgress {
+                            task_id: task.task_id.clone(),
+                            count,
+                            completed,
+                        });
+                    }
+
+                    let total_tasks = task_progress.len();
+                    let achievement_completed = total_tasks > 0 && completed_tasks == total_tasks;
+                    let progress_percentage = if total_tasks > 0 {
+                        (completed_tasks as f64 / total_tasks as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    // Build full task definitions for the achievement (simplified, no redundant fields)
+                    let proto_tasks: Vec<torii_proto::AchievementTask> = tasks
+                        .iter()
+                        .map(|task| torii_proto::AchievementTask {
+                            task_id: task.task_id.clone(),
+                            description: task.description.clone(),
+                            total: task.total as u32,
+                            total_completions: task.total_completions as u32,
+                            completion_rate: task.completion_rate,
+                            created_at: task.created_at,
+                        })
+                        .collect();
+
+                    // Calculate total completions and completion rate from tasks
+                    let (total_completions, avg_completion_rate) = if !tasks.is_empty() {
+                        let sum_completions: i32 = tasks.iter().map(|t| t.total_completions).sum();
+                        let sum_rate: f64 = tasks.iter().map(|t| t.completion_rate).sum();
+                        (
+                            sum_completions / tasks.len() as i32,
+                            sum_rate / tasks.len() as f64,
+                        )
+                    } else {
+                        (0, 0.0)
+                    };
+
+                    let world_address = Felt::from_str(world_address_str)
+                        .map_err(|e| Error::Parse(ParseError::FromStr(e)))?;
+
+                    achievement_progress.push(torii_proto::PlayerAchievementProgress {
+                        achievement: torii_proto::Achievement {
+                            id: achievement.id.clone(),
+                            world_address,
+                            namespace: namespace.clone(),
+                            entity_id: achievement
+                                .id
+                                .split(':')
+                                .next_back()
+                                .unwrap_or_default()
+                                .to_string(),
+                            hidden: achievement.hidden != 0,
+                            index: achievement.index_num as u32,
+                            points: achievement.points as u32,
+                            start: achievement.start,
+                            end: achievement.end,
+                            group: achievement.group_name,
+                            icon: achievement.icon,
+                            title: achievement.title,
+                            description: achievement.description,
+                            tasks: proto_tasks,
+                            data: achievement.data,
+                            total_completions: total_completions as u32,
+                            completion_rate: avg_completion_rate,
+                            created_at: achievement.created_at,
+                            updated_at: achievement.updated_at,
+                        },
+                        task_progress,
+                        completed: achievement_completed,
+                        progress_percentage,
+                    });
+                }
+            }
+
+            player_entries.push(torii_proto::PlayerAchievementEntry {
+                player_address,
+                stats: stats_proto,
+                achievements: achievement_progress,
+            });
+        }
+
+        Ok(Page {
+            items: player_entries,
+            next_cursor: page.next_cursor,
+        })
+    }
+
+    /// Performs a global search across the unified FTS5 search index.
+    ///
+    /// Uses a single SQLite FTS5 virtual table for fast, ranked full-text search
+    /// across all entity types:
+    /// - Achievements: title, description, group_name
+    /// - Controllers: username
+    /// - Token Attributes: trait_name, trait_value (NFT traits)
+    /// - Tokens: name, symbol (ERC20 only, token_id IS NULL)
+    ///
+    /// The unified index is automatically maintained via triggers.
+    ///
+    /// Query syntax supports FTS5 features:
+    /// - Simple: "dragon" or "USDC"
+    /// - Phrase: '"dragon slayer"'
+    /// - Prefix: "dra*" (if prefix_matching enabled in config)
+    /// - Boolean: "dragon OR knight"
+    /// - Column-specific: "primary_text:dragon"
+    ///
+    /// Results are ranked by relevance using BM25 algorithm and grouped by entity type.
+    async fn search(&self, query: &SearchQuery) -> Result<SearchResponse, StorageError> {
+        use std::collections::HashMap;
+
+        // Validate query length
+        let search_term = query.query.trim();
+        if search_term.is_empty() {
+            return Ok(SearchResponse {
+                total: 0,
+                results: vec![],
+            });
+        }
+
+        // Validate against min_query_length from config
+        if search_term.len() < self.config.search_min_query_length {
+            return Ok(SearchResponse {
+                total: 0,
+                results: vec![],
+            });
+        }
+
+        // Apply prefix matching if enabled
+        let fts_query = if self.config.search_prefix_matching && !search_term.ends_with('*') {
+            format!("{}*", search_term)
+        } else {
+            search_term.to_string()
+        };
+
+        let limit = if query.limit > 0 && query.limit <= self.config.search_max_results as u32 {
+            query.limit
+        } else {
+            self.config.search_max_results as u32
+        };
+
+        // Build unified search query
+        let sql = format!(
+            "SELECT entity_type, entity_id, primary_text, secondary_text, metadata, \
+             bm25(search_index) as rank \
+             FROM search_index \
+             WHERE search_index MATCH ? \
+             ORDER BY rank ASC \
+             LIMIT {}",
+            limit * 3 // Get more results for proper grouping by entity type
+        );
+        let bind_values: Vec<String> = vec![fts_query];
+
+        // Execute query
+        let mut sqlx_query = sqlx::query(&sql);
+        for value in bind_values {
+            sqlx_query = sqlx_query.bind(value);
+        }
+
+        let rows = match sqlx_query.fetch_all(&self.pool).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!("Unified FTS5 search failed: {}", e);
+                return Ok(SearchResponse {
+                    total: 0,
+                    results: vec![],
+                });
+            }
+        };
+
+        // Group results by entity_type
+        let mut grouped_results: HashMap<String, Vec<SearchMatch>> = HashMap::new();
+        let mut entity_counts: HashMap<String, u32> = HashMap::new();
+
+        for row in rows {
+            let entity_type: String = row.try_get("entity_type").unwrap_or_default();
+            let entity_id: String = row.try_get("entity_id").unwrap_or_default();
+            let primary_text: String = row.try_get("primary_text").unwrap_or_default();
+            let secondary_text: String = row.try_get("secondary_text").unwrap_or_default();
+            let metadata: String = row.try_get("metadata").unwrap_or_else(|_| "{}".to_string());
+            let score: Option<f64> = row.try_get("rank").ok();
+
+            // Count per entity type
+            *entity_counts.entry(entity_type.clone()).or_insert(0) += 1;
+
+            // Apply per-type limit
+            let type_count = entity_counts.get(&entity_type).copied().unwrap_or(0);
+            if type_count > limit {
+                continue;
+            }
+
+            // Parse metadata JSON
+            let metadata_map: HashMap<String, String> =
+                serde_json::from_str(&metadata).unwrap_or_default();
+
+            let mut fields = metadata_map;
+            fields.insert("entity_id".to_string(), entity_id.clone());
+            fields.insert("primary_text".to_string(), primary_text.clone());
+            if !secondary_text.is_empty() {
+                fields.insert("secondary_text".to_string(), secondary_text.clone());
+            }
+
+            // Add snippet if enabled
+            if self.config.search_return_snippets {
+                let text = if !secondary_text.is_empty() {
+                    &secondary_text
+                } else {
+                    &primary_text
+                };
+                let snippet = if text.len() > self.config.search_snippet_length {
+                    format!("{}...", &text[..self.config.search_snippet_length])
+                } else {
+                    text.clone()
+                };
+                fields.insert("snippet".to_string(), snippet);
+            }
+
+            grouped_results
+                .entry(entity_type)
+                .or_default()
+                .push(SearchMatch {
+                    id: entity_id,
+                    fields,
+                    score,
+                });
+        }
+
+        // Convert to response format
+        let mut all_results = Vec::new();
+        let mut total_count = 0u32;
+
+        // Map entity_type to table names for compatibility
+        let type_to_table = |entity_type: &str| -> String {
+            match entity_type {
+                "achievement" => "achievements".to_string(),
+                "controller" => "controllers".to_string(),
+                "token_attribute" => "token_attributes".to_string(),
+                "token" => "tokens".to_string(),
+                _ => entity_type.to_string(),
+            }
+        };
+
+        for (entity_type, matches) in grouped_results {
+            let count = matches.len() as u32;
+            total_count += count;
+            all_results.push(TableSearchResults {
+                table: type_to_table(&entity_type),
+                count,
+                matches,
+            });
+        }
+
+        Ok(SearchResponse {
+            total: total_count,
+            results: all_results,
+        })
     }
 }
 
@@ -875,6 +1725,7 @@ impl Storage for Sql {
     /// update the model schema and its table.
     async fn register_model(
         &self,
+        world_address: Felt,
         selector: Felt,
         model: &Ty,
         layout: &Layout,
@@ -890,15 +1741,22 @@ impl Storage for Sql {
         let namespaced_name = model.name();
         let (namespace, name) = namespaced_name.split_once('-').unwrap();
 
+        // Create world-scoped model ID: "world_address:model_selector"
+        let scoped_model_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &selector);
+        let selector_str = felt_to_sql_string(&selector);
+        let world_address_str = felt_to_sql_string(&world_address);
         let insert_models =
-            "INSERT INTO models (id, namespace, name, class_hash, contract_address, layout, \
-             legacy_store, schema, packed_size, unpacked_size, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
-             ?) ON CONFLICT(id) DO UPDATE SET contract_address=EXCLUDED.contract_address, \
+            "INSERT INTO models (id, world_address, model_selector, namespace, name, class_hash, contract_address, layout, \
+             legacy_store, schema, packed_size, unpacked_size, executed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \
+             ?, ?) ON CONFLICT(id) DO UPDATE SET world_address=EXCLUDED.world_address, model_selector=EXCLUDED.model_selector, contract_address=EXCLUDED.contract_address, \
              class_hash=EXCLUDED.class_hash, layout=EXCLUDED.layout, legacy_store=EXCLUDED.legacy_store, \
              schema=EXCLUDED.schema, packed_size=EXCLUDED.packed_size, unpacked_size=EXCLUDED.unpacked_size, \
              executed_at=EXCLUDED.executed_at RETURNING *";
         let arguments = vec![
-            Argument::FieldElement(selector),
+            Argument::String(scoped_model_id),
+            Argument::String(world_address_str),
+            Argument::String(selector_str),
             Argument::String(namespace.to_string()),
             Argument::String(name.to_string()),
             Argument::FieldElement(class_hash),
@@ -936,10 +1794,13 @@ impl Storage for Sql {
         for hook in self.config.hooks.iter() {
             if let HookEvent::ModelRegistered { model_tag } = &hook.event {
                 if namespaced_name == *model_tag {
+                    // For hooks, pass the world-scoped model ID
+                    let scoped_model_id =
+                        torii_storage::utils::format_world_scoped_id(&world_address, &selector);
                     self.executor
                         .send(QueryMessage::other(
                             hook.statement.clone(),
-                            vec![Argument::FieldElement(selector)],
+                            vec![Argument::String(scoped_model_id)],
                         ))
                         .map_err(|e| {
                             Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
@@ -988,6 +1849,7 @@ impl Storage for Sql {
     /// Along with its model state in the model table.
     async fn set_entity(
         &self,
+        world_address: Felt,
         entity: Ty,
         event_id: &str,
         block_timestamp: u64,
@@ -997,24 +1859,29 @@ impl Storage for Sql {
     ) -> Result<(), StorageError> {
         let namespaced_name = entity.name();
 
-        let entity_id = format!("{:#066x}", entity_id);
-        let model_id = format!("{:#x}", model_selector);
+        // Format entity_id with world_address prefix for multi-world support
+        let scoped_entity_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &entity_id);
+        let entity_id_str = felt_to_sql_string(&entity_id);
+        let scoped_model_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &model_selector);
+        let world_address_str = felt_to_sql_string(&world_address);
 
         let keys_str = keys.map(|keys| felts_to_sql_string(&keys));
-
         let insert_entities = if keys_str.is_some() {
-            "INSERT INTO entities (id, event_id, executed_at, keys) VALUES (?, ?, ?, ?) ON \
-             CONFLICT(id) DO UPDATE SET updated_at=CURRENT_TIMESTAMP, \
-             executed_at=EXCLUDED.executed_at, event_id=EXCLUDED.event_id, keys=EXCLUDED.keys \
-             RETURNING *"
+            "INSERT INTO entities (id, world_address, entity_id, event_id, executed_at, keys) VALUES (?, ?, ?, ?, ?, ?) ON \
+             CONFLICT(id) DO UPDATE SET world_address=EXCLUDED.world_address, updated_at=CURRENT_TIMESTAMP, entity_id=EXCLUDED.entity_id, \
+             executed_at=EXCLUDED.executed_at, event_id=EXCLUDED.event_id, keys=EXCLUDED.keys RETURNING *"
         } else {
-            "INSERT INTO entities (id, event_id, executed_at) VALUES (?, ?, ?) ON CONFLICT(id) DO \
-             UPDATE SET updated_at=CURRENT_TIMESTAMP, executed_at=EXCLUDED.executed_at, \
+            "INSERT INTO entities (id, world_address, entity_id, event_id, executed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO \
+             UPDATE SET world_address=EXCLUDED.world_address, updated_at=CURRENT_TIMESTAMP, entity_id=EXCLUDED.entity_id, executed_at=EXCLUDED.executed_at, \
              event_id=EXCLUDED.event_id RETURNING *"
         };
 
         let mut arguments = vec![
-            Argument::String(entity_id.clone()),
+            Argument::String(scoped_entity_id.clone()),
+            Argument::String(world_address_str.clone()),
+            Argument::String(entity_id_str.clone()),
             Argument::String(event_id.to_string()),
             Argument::String(utc_dt_string_from_timestamp(block_timestamp)),
         ];
@@ -1023,6 +1890,8 @@ impl Storage for Sql {
             arguments.push(Argument::String(keys));
         }
 
+        arguments.push(Argument::String(world_address_str.clone()));
+
         self.executor
             .send(QueryMessage::new(
                 insert_entities.to_string(),
@@ -1030,8 +1899,8 @@ impl Storage for Sql {
                 QueryType::SetEntity(EntityQuery {
                     event_id: event_id.to_string(),
                     block_timestamp: utc_dt_string_from_timestamp(block_timestamp),
-                    entity_id: entity_id.clone(),
-                    model_id: model_id.clone(),
+                    entity_id: scoped_entity_id.clone(),
+                    model_id: scoped_model_id.clone(),
                     keys_str: keys_str.clone(),
                     ty: entity.clone(),
                     is_historical: self.config.is_historical(&model_selector),
@@ -1046,15 +1915,15 @@ impl Storage for Sql {
              model_id) DO NOTHING"
                 .to_string(),
             vec![
-                Argument::String(entity_id.clone()),
-                Argument::String(model_id.clone()),
+                Argument::String(scoped_entity_id.clone()),
+                Argument::String(scoped_model_id.clone()),
             ],
         )).map_err(|e| Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e)))))?;
 
         self.set_entity_model(
             &namespaced_name,
             event_id,
-            &entity_id,
+            &scoped_entity_id,
             &entity,
             block_timestamp,
         )?;
@@ -1065,7 +1934,7 @@ impl Storage for Sql {
                     self.executor
                         .send(QueryMessage::other(
                             hook.statement.clone(),
-                            vec![Argument::String(entity_id.clone())],
+                            vec![Argument::String(scoped_entity_id.clone())],
                         ))
                         .map_err(|e| {
                             Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
@@ -1084,6 +1953,7 @@ impl Storage for Sql {
     /// Along with its model state in the model table.
     async fn set_event_message(
         &self,
+        world_address: Felt,
         entity: Ty,
         event_id: &str,
         block_timestamp: u64,
@@ -1092,29 +1962,37 @@ impl Storage for Sql {
         let namespaced_name = entity.name();
         let (model_namespace, model_name) = namespaced_name.split_once('-').unwrap();
 
-        let entity_id = format!("{:#066x}", poseidon_hash_many(&keys));
+        let entity_id = poseidon_hash_many(&keys);
+        let scoped_entity_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &entity_id);
+        let entity_id_str = felt_to_sql_string(&entity_id);
         let model_selector = compute_selector_from_names(model_namespace, model_name);
-        let model_id = format!("{:#x}", model_selector);
+        let scoped_model_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &model_selector);
+        let world_address_str = felt_to_sql_string(&world_address);
 
         let keys_str = felts_to_sql_string(&keys);
         let block_timestamp_str = utc_dt_string_from_timestamp(block_timestamp);
 
-        let insert_entities = "INSERT INTO event_messages (id, keys, event_id, executed_at) \
-                               VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET \
+        let insert_entities = "INSERT INTO event_messages (id, world_address, entity_id, keys, event_id, executed_at) \
+                               VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET \
                                updated_at=CURRENT_TIMESTAMP, executed_at=EXCLUDED.executed_at, \
                                event_id=EXCLUDED.event_id RETURNING *";
         self.executor
             .send(QueryMessage::new(
                 insert_entities.to_string(),
                 vec![
-                    Argument::String(entity_id.clone()),
+                    Argument::String(scoped_entity_id.clone()),
+                    Argument::String(world_address_str.clone()),
+                    Argument::String(entity_id_str.clone()),
                     Argument::String(keys_str.clone()),
                     Argument::String(event_id.to_string()),
                     Argument::String(block_timestamp_str.clone()),
                 ],
                 QueryType::EventMessage(EventMessageQuery {
-                    entity_id: entity_id.clone(),
-                    model_id: model_id.clone(),
+                    world_address: world_address_str.clone(),
+                    entity_id: scoped_entity_id.clone(),
+                    model_id: scoped_model_id.clone(),
                     keys_str: keys_str.clone(),
                     event_id: event_id.to_string(),
                     block_timestamp: block_timestamp_str.clone(),
@@ -1129,7 +2007,7 @@ impl Storage for Sql {
         self.set_entity_model(
             &namespaced_name,
             event_id,
-            &format!("event:{}", entity_id),
+            &format!("event:{}", scoped_entity_id),
             &entity,
             block_timestamp,
         )?;
@@ -1140,7 +2018,7 @@ impl Storage for Sql {
                     self.executor
                         .send(QueryMessage::other(
                             hook.statement.clone(),
-                            vec![Argument::String(entity_id.clone())],
+                            vec![Argument::String(scoped_entity_id.clone())],
                         ))
                         .map_err(|e| {
                             Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
@@ -1159,23 +2037,26 @@ impl Storage for Sql {
     /// Along with its model state in the model table.
     async fn delete_entity(
         &self,
+        world_address: Felt,
         entity_id: Felt,
         model_id: Felt,
         entity: Ty,
         event_id: &str,
         block_timestamp: u64,
     ) -> Result<(), StorageError> {
-        let entity_id = format!("{:#066x}", entity_id);
-        let model_id = format!("{:#x}", model_id);
+        let scoped_entity_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &entity_id);
+        let scoped_model_id =
+            torii_storage::utils::format_world_scoped_id(&world_address, &model_id);
         let model_table = entity.name();
 
         self.executor
             .send(QueryMessage::new(
                 format!("DELETE FROM [{model_table}] WHERE internal_id = ?").to_string(),
-                vec![Argument::String(entity_id.clone())],
+                vec![Argument::String(scoped_entity_id.clone())],
                 QueryType::DeleteEntity(DeleteEntityQuery {
-                    model_id: model_id.clone(),
-                    entity_id: entity_id.clone(),
+                    model_id: scoped_model_id.clone(),
+                    entity_id: scoped_entity_id.clone(),
                     event_id: event_id.to_string(),
                     block_timestamp: utc_dt_string_from_timestamp(block_timestamp),
                     ty: entity.clone(),
@@ -1191,7 +2072,7 @@ impl Storage for Sql {
                     self.executor
                         .send(QueryMessage::other(
                             hook.statement.clone(),
-                            vec![Argument::String(entity_id.clone())],
+                            vec![Argument::String(scoped_entity_id.clone())],
                         ))
                         .map_err(|e| {
                             Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(
@@ -1438,19 +2319,14 @@ impl Storage for Sql {
     /// Updates metadata for a token.
     async fn update_token_metadata(
         &self,
-        contract_address: Felt,
-        token_id: Option<U256>,
+        token_id: TokenId,
         metadata: String,
     ) -> Result<(), StorageError> {
         self.executor
             .send(QueryMessage::new(
                 "".to_string(),
                 vec![],
-                QueryType::UpdateTokenMetadata(UpdateTokenMetadataQuery {
-                    contract_address,
-                    token_id,
-                    metadata,
-                }),
+                QueryType::UpdateTokenMetadata(UpdateTokenMetadataQuery { token_id, metadata }),
             ))
             .map_err(|e| {
                 Error::ExecutorQuery(Box::new(ExecutorQueryError::SendError(Box::new(e))))
@@ -1461,24 +2337,18 @@ impl Storage for Sql {
 
     /// Stores an ERC transfer event with the storage.
     #[allow(clippy::too_many_arguments)]
-    async fn store_erc_transfer_event(
+    async fn store_token_transfer(
         &self,
-        contract_address: Felt,
+        token_id: TokenId,
         from: Felt,
         to: Felt,
         amount: U256,
-        token_id: Option<U256>,
         block_timestamp: u64,
         event_id: &str,
     ) -> Result<(), StorageError> {
-        let token_id = if let Some(token_id) = token_id {
-            felt_and_u256_to_sql_string(&contract_address, &token_id)
-        } else {
-            felt_to_sql_string(&contract_address)
-        };
-
         let id = format!("{}:{}", event_id, token_id);
         let token_id_str = token_id.to_string();
+        let contract_address = token_id.contract_address();
         let event_id_str = event_id.to_string();
         let executed_at_str = utc_dt_string_from_timestamp(block_timestamp);
 
@@ -1512,8 +2382,8 @@ impl Storage for Sql {
     /// Applies cached balance differences to the storage.
     async fn apply_balances_diff(
         &self,
-        balances_diff: HashMap<String, I256>,
-        total_supply_diff: HashMap<String, I256>,
+        balances_diff: HashMap<BalanceId, I256>,
+        total_supply_diff: HashMap<TokenId, I256>,
         cursors: HashMap<Felt, ContractCursor>,
     ) -> Result<(), StorageError> {
         self.executor

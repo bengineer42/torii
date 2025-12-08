@@ -34,6 +34,116 @@ use serde::{Deserialize, Serialize};
 use starknet::core::types::Felt;
 use strum_macros::{AsRefStr, EnumIter, FromRepr};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum TokenId {
+    Contract(Felt),
+    Nft(Felt, starknet::core::types::U256),
+}
+
+impl TokenId {
+    pub fn is_nft(&self) -> bool {
+        matches!(self, TokenId::Nft(_, _))
+    }
+
+    pub fn contract_address(&self) -> Felt {
+        match self {
+            TokenId::Contract(addr) => *addr,
+            TokenId::Nft(addr, _) => *addr,
+        }
+    }
+
+    pub fn token_id(&self) -> Option<starknet::core::types::U256> {
+        match self {
+            TokenId::Contract(_) => None,
+            TokenId::Nft(_, token_id) => Some(*token_id),
+        }
+    }
+}
+
+impl std::fmt::Display for TokenId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokenId::Contract(addr) => write!(f, "{:#064x}", addr),
+            TokenId::Nft(addr, token_id) => write!(f, "{:#064x}:{:#064x}", addr, token_id),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BalanceId {
+    pub account_address: Felt,
+    pub token_id: TokenId,
+}
+
+impl std::fmt::Display for BalanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#064x}/{}", self.account_address, self.token_id)
+    }
+}
+
+/// SQL query value types
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum SqlValue {
+    Text(String),
+    Integer(i64),
+    Real(f64),
+    Blob(Vec<u8>),
+    Null,
+}
+
+/// A single row from SQL query results
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SqlRow {
+    pub fields: HashMap<String, SqlValue>,
+}
+
+impl From<proto::types::SqlValue> for SqlValue {
+    fn from(value: proto::types::SqlValue) -> Self {
+        match value.value_type {
+            Some(proto::types::sql_value::ValueType::Text(text)) => SqlValue::Text(text),
+            Some(proto::types::sql_value::ValueType::Integer(int)) => SqlValue::Integer(int),
+            Some(proto::types::sql_value::ValueType::Real(real)) => SqlValue::Real(real),
+            Some(proto::types::sql_value::ValueType::Blob(blob)) => SqlValue::Blob(blob),
+            Some(proto::types::sql_value::ValueType::Null(_)) | None => SqlValue::Null,
+        }
+    }
+}
+
+impl From<SqlValue> for proto::types::SqlValue {
+    fn from(value: SqlValue) -> Self {
+        let value_type = match value {
+            SqlValue::Text(text) => Some(proto::types::sql_value::ValueType::Text(text)),
+            SqlValue::Integer(int) => Some(proto::types::sql_value::ValueType::Integer(int)),
+            SqlValue::Real(real) => Some(proto::types::sql_value::ValueType::Real(real)),
+            SqlValue::Blob(blob) => Some(proto::types::sql_value::ValueType::Blob(blob)),
+            SqlValue::Null => Some(proto::types::sql_value::ValueType::Null(true)),
+        };
+        Self { value_type }
+    }
+}
+
+impl From<proto::types::SqlRow> for SqlRow {
+    fn from(value: proto::types::SqlRow) -> Self {
+        let fields = value
+            .fields
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect();
+        Self { fields }
+    }
+}
+
+impl From<SqlRow> for proto::types::SqlRow {
+    fn from(value: SqlRow) -> Self {
+        let fields = value
+            .fields
+            .into_iter()
+            .map(|(k, v)| (k, v.into()))
+            .collect();
+        Self { fields }
+    }
+}
+
 /// Represents a cursor for tracking blockchain state
 #[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone, Default)]
 pub struct ContractCursor {
@@ -224,6 +334,7 @@ pub struct Message {
     pub signature: Vec<Felt>,
     // The raw TypedData. Should be deserializable to a TypedData struct.
     pub message: String,
+    pub world_address: Felt,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone, Default)]
@@ -642,6 +753,104 @@ pub struct TokenContractQuery {
     pub pagination: Pagination,
 }
 
+/// Query for aggregations (formerly leaderboards)
+#[derive(Debug, Clone, Default)]
+pub struct AggregationQuery {
+    pub aggregator_ids: Vec<String>,
+    pub entity_ids: Vec<String>,
+    pub pagination: Pagination,
+}
+
+/// Represents an entry in an aggregation with its calculated position
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregationEntry {
+    pub id: String,
+    pub aggregator_id: String,
+    pub entity_id: String,
+    pub value: U256,
+    pub display_value: String,
+    pub position: u64,
+    pub model_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl Default for AggregationEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            aggregator_id: String::new(),
+            entity_id: String::new(),
+            value: U256::ZERO,
+            display_value: String::new(),
+            position: 0,
+            model_id: String::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+}
+
+impl From<AggregationQuery> for proto::types::AggregationQuery {
+    fn from(value: AggregationQuery) -> Self {
+        Self {
+            aggregator_ids: value.aggregator_ids,
+            entity_ids: value.entity_ids,
+            pagination: Some(value.pagination.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::types::AggregationQuery> for AggregationQuery {
+    type Error = ProtoError;
+
+    fn try_from(value: proto::types::AggregationQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            aggregator_ids: value.aggregator_ids,
+            entity_ids: value.entity_ids,
+            pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
+        })
+    }
+}
+
+impl From<AggregationEntry> for proto::types::AggregationEntry {
+    fn from(value: AggregationEntry) -> Self {
+        Self {
+            id: value.id,
+            aggregator_id: value.aggregator_id,
+            entity_id: value.entity_id,
+            value: value.value.to_be_bytes().to_vec(),
+            display_value: value.display_value,
+            position: value.position,
+            model_id: value.model_id,
+            created_at: value.created_at.to_rfc3339(),
+            updated_at: value.updated_at.to_rfc3339(),
+        }
+    }
+}
+
+impl TryFrom<proto::types::AggregationEntry> for AggregationEntry {
+    type Error = ProtoError;
+
+    fn try_from(value: proto::types::AggregationEntry) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            aggregator_id: value.aggregator_id,
+            entity_id: value.entity_id,
+            value: U256::from_be_slice(&value.value),
+            display_value: value.display_value,
+            position: value.position,
+            model_id: value.model_id,
+            created_at: DateTime::parse_from_rfc3339(&value.created_at)
+                .map_err(|e| ProtoError::ParseTimestamp(value.created_at.clone(), e))?
+                .with_timezone(&Utc),
+            updated_at: DateTime::parse_from_rfc3339(&value.updated_at)
+                .map_err(|e| ProtoError::ParseTimestamp(value.updated_at.clone(), e))?
+                .with_timezone(&Utc),
+        })
+    }
+}
+
 impl From<TokenBalanceQuery> for proto::types::TokenBalanceQuery {
     fn from(value: TokenBalanceQuery) -> Self {
         Self {
@@ -809,6 +1018,8 @@ pub struct Query {
     pub models: Vec<String>,
     /// Whether or not we should retrieve historical entities.
     pub historical: bool,
+    /// The world address of the world.
+    pub world_addresses: Vec<Felt>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Hash, Eq, Clone)]
@@ -983,6 +1194,8 @@ pub enum ValueType {
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct Model {
+    /// The world address of the model
+    pub world_address: Felt,
     /// Namespace of the model
     pub namespace: String,
     /// The name of the model
@@ -1006,6 +1219,7 @@ impl TryFrom<proto::types::Model> for Model {
         let schema: Ty = serde_json::from_slice(&value.schema).map_err(ProtoError::FromJson)?;
         let layout: Layout = serde_json::from_slice(&value.layout).map_err(ProtoError::FromJson)?;
         Ok(Self {
+            world_address: Felt::from_bytes_be_slice(&value.world_address),
             selector: Felt::from_bytes_be_slice(&value.selector),
             schema,
             layout,
@@ -1017,6 +1231,24 @@ impl TryFrom<proto::types::Model> for Model {
             class_hash: Felt::from_bytes_be_slice(&value.class_hash),
             contract_address: Felt::from_bytes_be_slice(&value.contract_address),
         })
+    }
+}
+
+impl From<Model> for proto::types::Model {
+    fn from(value: Model) -> Self {
+        Self {
+            selector: value.selector.to_bytes_be().to_vec(),
+            namespace: value.namespace,
+            name: value.name,
+            packed_size: value.packed_size,
+            unpacked_size: value.unpacked_size,
+            use_legacy_store: value.use_legacy_store,
+            class_hash: value.class_hash.to_bytes_be().to_vec(),
+            contract_address: value.contract_address.to_bytes_be().to_vec(),
+            layout: serde_json::to_vec(&value.layout).unwrap(),
+            schema: serde_json::to_vec(&value.schema).unwrap(),
+            world_address: value.world_address.to_bytes_be().to_vec(),
+        }
     }
 }
 
@@ -1057,6 +1289,11 @@ impl TryFrom<proto::types::Query> for Query {
             no_hashed_keys: value.no_hashed_keys,
             models: value.models,
             historical: value.historical,
+            world_addresses: value
+                .world_addresses
+                .iter()
+                .map(|w| Felt::from_bytes_be_slice(w))
+                .collect(),
         })
     }
 }
@@ -1069,6 +1306,11 @@ impl From<Query> for proto::types::Query {
             models: value.models,
             pagination: Some(value.pagination.into()),
             historical: value.historical,
+            world_addresses: value
+                .world_addresses
+                .iter()
+                .map(|w| w.to_bytes_be().to_vec())
+                .collect(),
         }
     }
 }
@@ -1593,6 +1835,509 @@ pub struct TransactionQuery {
     pub pagination: Pagination,
 }
 
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct Activity {
+    pub id: String,
+    pub world_address: Felt,
+    pub namespace: String,
+    pub caller_address: Felt,
+    pub session_start: DateTime<Utc>,
+    pub session_end: DateTime<Utc>,
+    pub action_count: u32,
+    pub actions: HashMap<String, u32>, // Map of action name -> count
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<Activity> for proto::types::Activity {
+    fn from(value: Activity) -> Self {
+        Self {
+            id: value.id,
+            world_address: value.world_address.to_bytes_be().to_vec(),
+            namespace: value.namespace,
+            caller_address: value.caller_address.to_bytes_be().to_vec(),
+            session_start: value.session_start.timestamp() as u64,
+            session_end: value.session_end.timestamp() as u64,
+            action_count: value.action_count,
+            actions: value.actions,
+            updated_at: value.updated_at.timestamp() as u64,
+        }
+    }
+}
+
+impl TryFrom<proto::types::Activity> for Activity {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::Activity) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            world_address: Felt::from_bytes_be_slice(&value.world_address),
+            namespace: value.namespace,
+            caller_address: Felt::from_bytes_be_slice(&value.caller_address),
+            session_start: DateTime::from_timestamp(value.session_start as i64, 0).unwrap(),
+            session_end: DateTime::from_timestamp(value.session_end as i64, 0).unwrap(),
+            action_count: value.action_count,
+            actions: value.actions,
+            updated_at: DateTime::from_timestamp(value.updated_at as i64, 0).unwrap(),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct ActivityQuery {
+    pub world_addresses: Vec<Felt>,
+    pub namespaces: Vec<String>,
+    pub caller_addresses: Vec<Felt>,
+    pub from_time: Option<DateTime<Utc>>,
+    pub to_time: Option<DateTime<Utc>>,
+    pub pagination: Pagination,
+}
+
+impl From<ActivityQuery> for proto::types::ActivityQuery {
+    fn from(value: ActivityQuery) -> Self {
+        Self {
+            world_addresses: value
+                .world_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            namespaces: value.namespaces,
+            caller_addresses: value
+                .caller_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            from_time: value.from_time.map(|t| t.timestamp() as u64),
+            to_time: value.to_time.map(|t| t.timestamp() as u64),
+            pagination: Some(value.pagination.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::types::ActivityQuery> for ActivityQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::ActivityQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            world_addresses: value
+                .world_addresses
+                .into_iter()
+                .map(|a| Felt::from_bytes_be_slice(&a))
+                .collect(),
+            namespaces: value.namespaces,
+            caller_addresses: value
+                .caller_addresses
+                .into_iter()
+                .map(|a| Felt::from_bytes_be_slice(&a))
+                .collect(),
+            from_time: value
+                .from_time
+                .map(|t| DateTime::from_timestamp(t as i64, 0).unwrap()),
+            to_time: value
+                .to_time
+                .map(|t| DateTime::from_timestamp(t as i64, 0).unwrap()),
+            pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
+        })
+    }
+}
+
+// ===== Achievement Types =====
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct Achievement {
+    pub id: String,
+    pub world_address: Felt,
+    pub namespace: String,
+    pub entity_id: String,
+    pub hidden: bool,
+    pub index: u32,
+    pub points: u32,
+    pub start: String,
+    pub end: String,
+    pub group: String,
+    pub icon: String,
+    pub title: String,
+    pub description: String,
+    pub tasks: Vec<AchievementTask>,
+    pub data: Option<String>,
+    pub total_completions: u32,
+    pub completion_rate: f64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TryFrom<proto::types::Achievement> for Achievement {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::Achievement) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            world_address: Felt::from_bytes_be_slice(&value.world_address),
+            namespace: value.namespace,
+            entity_id: value.entity_id,
+            hidden: value.hidden,
+            index: value.index,
+            points: value.points,
+            start: value.start,
+            end: value.end,
+            group: value.group,
+            icon: value.icon,
+            title: value.title,
+            description: value.description,
+            tasks: value
+                .tasks
+                .into_iter()
+                .map(|t| t.try_into())
+                .collect::<Result<Vec<AchievementTask>, Self::Error>>()?,
+            data: value.data,
+            total_completions: value.total_completions,
+            completion_rate: value.completion_rate,
+            created_at: DateTime::from_timestamp(value.created_at as i64, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(value.updated_at as i64, 0).unwrap(),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AchievementTask {
+    pub task_id: String,
+    pub description: String,
+    pub total: u32,
+    pub total_completions: u32,
+    pub completion_rate: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TryFrom<proto::types::AchievementTask> for AchievementTask {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::AchievementTask) -> Result<Self, Self::Error> {
+        Ok(Self {
+            task_id: value.task_id,
+            description: value.description,
+            total: value.total,
+            total_completions: value.total_completions,
+            completion_rate: value.completion_rate,
+            created_at: DateTime::from_timestamp(value.created_at as i64, 0).unwrap(),
+        })
+    }
+}
+
+#[derive(Default, Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AchievementProgression {
+    pub id: String,
+    pub achievement_id: String,
+    pub task_id: String,
+    pub world_address: Felt,
+    pub namespace: String,
+    pub player_id: Felt,
+    pub count: u32,
+    pub completed: bool,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TryFrom<proto::types::AchievementProgression> for AchievementProgression {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::AchievementProgression) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.id,
+            achievement_id: value.achievement_id,
+            task_id: value.task_id,
+            world_address: Felt::from_bytes_be_slice(&value.world_address),
+            namespace: value.namespace,
+            player_id: Felt::from_bytes_be_slice(&value.player_id),
+            count: value.count,
+            completed: value.completed,
+            completed_at: value
+                .completed_at
+                .map(|t| DateTime::from_timestamp(t as i64, 0).unwrap()),
+            created_at: DateTime::from_timestamp(value.created_at as i64, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(value.updated_at as i64, 0).unwrap(),
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PlayerAchievementStats {
+    pub total_points: u32,
+    pub completed_achievements: u32,
+    pub total_achievements: u32,
+    pub completion_percentage: f64,
+    pub last_achievement_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl TryFrom<proto::types::PlayerAchievementStats> for PlayerAchievementStats {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::PlayerAchievementStats) -> Result<Self, Self::Error> {
+        Ok(Self {
+            total_points: value.total_points,
+            completed_achievements: value.completed_achievements,
+            total_achievements: value.total_achievements,
+            completion_percentage: value.completion_percentage,
+            last_achievement_at: value
+                .last_achievement_at
+                .map(|t| DateTime::from_timestamp(t as i64, 0).unwrap()),
+            created_at: DateTime::from_timestamp(value.created_at as i64, 0).unwrap(),
+            updated_at: DateTime::from_timestamp(value.updated_at as i64, 0).unwrap(),
+        })
+    }
+}
+// ===== Achievement Query Types =====
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct AchievementQuery {
+    pub world_addresses: Vec<Felt>,
+    pub namespaces: Vec<String>,
+    pub hidden: Option<bool>,
+    pub pagination: Pagination,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PlayerAchievementQuery {
+    pub world_addresses: Vec<Felt>,
+    pub namespaces: Vec<String>,
+    pub player_addresses: Vec<Felt>,
+    pub pagination: Pagination,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PlayerAchievementEntry {
+    pub player_address: Felt,
+    pub stats: PlayerAchievementStats,
+    pub achievements: Vec<PlayerAchievementProgress>,
+}
+
+impl TryFrom<proto::types::PlayerAchievementEntry> for PlayerAchievementEntry {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::PlayerAchievementEntry) -> Result<Self, Self::Error> {
+        Ok(Self {
+            player_address: Felt::from_bytes_be_slice(&value.player_address),
+            stats: value.stats.expect("stats is required").try_into()?,
+            achievements: value
+                .achievements
+                .into_iter()
+                .map(|a| a.try_into())
+                .collect::<Result<Vec<PlayerAchievementProgress>, Self::Error>>()?,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct PlayerAchievementProgress {
+    pub achievement: Achievement,
+    pub task_progress: Vec<TaskProgress>,
+    pub completed: bool,
+    pub progress_percentage: f64,
+}
+
+impl TryFrom<proto::types::PlayerAchievementProgress> for PlayerAchievementProgress {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::PlayerAchievementProgress) -> Result<Self, Self::Error> {
+        Ok(Self {
+            achievement: value
+                .achievement
+                .expect("achievement is required")
+                .try_into()?,
+            task_progress: value.task_progress.into_iter().map(|t| t.into()).collect(),
+            completed: value.completed,
+            progress_percentage: value.progress_percentage,
+        })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct TaskProgress {
+    pub task_id: String,
+    pub count: u32,
+    pub completed: bool,
+}
+
+impl From<proto::types::TaskProgress> for TaskProgress {
+    fn from(value: proto::types::TaskProgress) -> Self {
+        Self {
+            task_id: value.task_id,
+            count: value.count,
+            completed: value.completed,
+        }
+    }
+}
+
+// ===== Achievement Conversions =====
+
+impl From<Achievement> for proto::types::Achievement {
+    fn from(value: Achievement) -> Self {
+        Self {
+            id: value.id,
+            world_address: value.world_address.to_bytes_be().to_vec(),
+            namespace: value.namespace,
+            entity_id: value.entity_id,
+            hidden: value.hidden,
+            index: value.index,
+            points: value.points,
+            start: value.start,
+            end: value.end,
+            group: value.group,
+            icon: value.icon,
+            title: value.title,
+            description: value.description,
+            tasks: value.tasks.into_iter().map(Into::into).collect(),
+            data: value.data,
+            total_completions: value.total_completions,
+            completion_rate: value.completion_rate,
+            created_at: value.created_at.timestamp() as u64,
+            updated_at: value.updated_at.timestamp() as u64,
+        }
+    }
+}
+
+impl From<AchievementTask> for proto::types::AchievementTask {
+    fn from(value: AchievementTask) -> Self {
+        Self {
+            task_id: value.task_id,
+            description: value.description,
+            total: value.total,
+            total_completions: value.total_completions,
+            completion_rate: value.completion_rate,
+            created_at: value.created_at.timestamp() as u64,
+        }
+    }
+}
+
+impl From<PlayerAchievementStats> for proto::types::PlayerAchievementStats {
+    fn from(value: PlayerAchievementStats) -> Self {
+        Self {
+            total_points: value.total_points,
+            completed_achievements: value.completed_achievements,
+            total_achievements: value.total_achievements,
+            completion_percentage: value.completion_percentage,
+            last_achievement_at: value.last_achievement_at.map(|t| t.timestamp() as u64),
+            created_at: value.created_at.timestamp() as u64,
+            updated_at: value.updated_at.timestamp() as u64,
+        }
+    }
+}
+
+impl From<AchievementProgression> for proto::types::AchievementProgression {
+    fn from(value: AchievementProgression) -> Self {
+        Self {
+            id: value.id,
+            achievement_id: value.achievement_id,
+            task_id: value.task_id,
+            world_address: value.world_address.to_bytes_be().to_vec(),
+            namespace: value.namespace,
+            player_id: value.player_id.to_bytes_be().to_vec(),
+            count: value.count,
+            completed: value.completed,
+            completed_at: value.completed_at.map(|t| t.timestamp() as u64),
+            created_at: value.created_at.timestamp() as u64,
+            updated_at: value.updated_at.timestamp() as u64,
+        }
+    }
+}
+
+impl From<PlayerAchievementEntry> for proto::types::PlayerAchievementEntry {
+    fn from(value: PlayerAchievementEntry) -> Self {
+        Self {
+            player_address: value.player_address.to_bytes_be().to_vec(),
+            stats: Some(value.stats.into()),
+            achievements: value.achievements.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<PlayerAchievementProgress> for proto::types::PlayerAchievementProgress {
+    fn from(value: PlayerAchievementProgress) -> Self {
+        Self {
+            achievement: Some(value.achievement.into()),
+            task_progress: value.task_progress.into_iter().map(Into::into).collect(),
+            completed: value.completed,
+            progress_percentage: value.progress_percentage,
+        }
+    }
+}
+
+impl From<TaskProgress> for proto::types::TaskProgress {
+    fn from(value: TaskProgress) -> Self {
+        Self {
+            task_id: value.task_id,
+            count: value.count,
+            completed: value.completed,
+        }
+    }
+}
+
+impl From<AchievementQuery> for proto::types::AchievementQuery {
+    fn from(value: AchievementQuery) -> Self {
+        Self {
+            world_addresses: value
+                .world_addresses
+                .into_iter()
+                .map(|addr| addr.to_bytes_be().to_vec())
+                .collect(),
+            namespaces: value.namespaces,
+            hidden: value.hidden,
+            pagination: Some(value.pagination.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::types::AchievementQuery> for AchievementQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::AchievementQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            world_addresses: value
+                .world_addresses
+                .into_iter()
+                .map(|addr| Felt::from_bytes_be_slice(&addr))
+                .collect(),
+            namespaces: value.namespaces,
+            hidden: value.hidden,
+            pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
+        })
+    }
+}
+
+impl From<PlayerAchievementQuery> for proto::types::PlayerAchievementQuery {
+    fn from(value: PlayerAchievementQuery) -> Self {
+        Self {
+            world_addresses: value
+                .world_addresses
+                .into_iter()
+                .map(|addr| addr.to_bytes_be().to_vec())
+                .collect(),
+            namespaces: value.namespaces,
+            player_addresses: value
+                .player_addresses
+                .into_iter()
+                .map(|addr| addr.to_bytes_be().to_vec())
+                .collect(),
+            pagination: Some(value.pagination.into()),
+        }
+    }
+}
+
+impl TryFrom<proto::types::PlayerAchievementQuery> for PlayerAchievementQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::PlayerAchievementQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            world_addresses: value
+                .world_addresses
+                .into_iter()
+                .map(|addr| Felt::from_bytes_be_slice(&addr))
+                .collect(),
+            namespaces: value.namespaces,
+            player_addresses: value
+                .player_addresses
+                .into_iter()
+                .map(|addr| Felt::from_bytes_be_slice(&addr))
+                .collect(),
+            pagination: value
+                .pagination
+                .ok_or_else(|| ProtoError::MissingExpectedData("pagination".to_string()))?
+                .into(),
+        })
+    }
+}
+
 impl From<TransactionQuery> for proto::types::TransactionQuery {
     fn from(value: TransactionQuery) -> Self {
         Self {
@@ -1609,5 +2354,112 @@ impl TryFrom<proto::types::TransactionQuery> for TransactionQuery {
             filter: value.filter.map(|f| f.try_into()).transpose()?,
             pagination: value.pagination.map(|p| p.into()).unwrap_or_default(),
         })
+    }
+}
+
+// ===== Search Types =====
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct SearchQuery {
+    pub query: String,
+    pub limit: u32,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct SearchMatch {
+    pub id: String,
+    pub fields: std::collections::HashMap<String, String>,
+    pub score: Option<f64>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct TableSearchResults {
+    pub table: String,
+    pub count: u32,
+    pub matches: Vec<SearchMatch>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+pub struct SearchResponse {
+    pub total: u32,
+    pub results: Vec<TableSearchResults>,
+}
+
+// ===== Search Conversions =====
+
+impl From<SearchQuery> for proto::types::SearchQuery {
+    fn from(value: SearchQuery) -> Self {
+        Self {
+            query: value.query,
+            limit: value.limit,
+        }
+    }
+}
+
+impl TryFrom<proto::types::SearchQuery> for SearchQuery {
+    type Error = ProtoError;
+    fn try_from(value: proto::types::SearchQuery) -> Result<Self, Self::Error> {
+        Ok(Self {
+            query: value.query,
+            limit: value.limit,
+        })
+    }
+}
+
+impl From<SearchMatch> for proto::types::SearchMatch {
+    fn from(value: SearchMatch) -> Self {
+        Self {
+            id: value.id,
+            fields: value.fields,
+            score: value.score,
+        }
+    }
+}
+
+impl From<proto::types::SearchMatch> for SearchMatch {
+    fn from(value: proto::types::SearchMatch) -> Self {
+        Self {
+            id: value.id,
+            fields: value.fields,
+            score: value.score,
+        }
+    }
+}
+
+impl From<TableSearchResults> for proto::types::TableSearchResults {
+    fn from(value: TableSearchResults) -> Self {
+        Self {
+            table: value.table,
+            count: value.count,
+            matches: value.matches.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<proto::types::TableSearchResults> for TableSearchResults {
+    fn from(value: proto::types::TableSearchResults) -> Self {
+        Self {
+            table: value.table,
+            count: value.count,
+            matches: value.matches.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<SearchResponse> for proto::types::SearchResponse {
+    fn from(value: SearchResponse) -> Self {
+        Self {
+            total: value.total,
+            results: value.results.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl From<proto::types::SearchResponse> for SearchResponse {
+    fn from(value: proto::types::SearchResponse) -> Self {
+        Self {
+            total: value.total,
+            results: value.results.into_iter().map(Into::into).collect(),
+        }
     }
 }

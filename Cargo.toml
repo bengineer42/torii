@@ -21,7 +21,7 @@ edition = "2021"
 license = "Apache-2.0"
 license-file = "LICENSE"
 repository = "https://github.com/dojoengine/torii"
-version = "1.7.3"
+version = "1.8.8"
 
 [profile.performance]
 codegen-units = 1
@@ -34,20 +34,20 @@ debug = true
 inherits = "release"
 
 [workspace.dependencies]
-cainome = { version = "0.10.0", features = ["abigen-rs"] }
-cainome-cairo-serde = { version = "0.4.0" }
+cainome = { version = "0.10.1", features = ["abigen-rs"] }
+cainome-cairo-serde = { version = "0.4.1" }
 cainome-cairo-serde-derive = { version = "0.1.0" }
 
 
 # dojo
-dojo-utils = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-dojo-types = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-dojo-world = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-dojo-test-utils = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-dojo-metrics = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-scarb-metadata-ext = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-scarb-interop = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
-sozo-ops = { git = "https://github.com/bengineer42/dojo", branch = "primitive-from-sql-new-models" }
+dojo-utils = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+dojo-types = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+dojo-world = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+dojo-test-utils = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+dojo-metrics = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+scarb-metadata-ext = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+scarb-interop = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
+sozo-ops = { git = "https://github.com/bengineer42/dojo", branch = "1.8-beacon" }
 
 # katana
 katana-runner = { git = "https://github.com/dojoengine/katana", rev = "eba352a" }

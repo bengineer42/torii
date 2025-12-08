@@ -13,9 +13,12 @@ use torii_math::I256;
 use torii_proto::schema::Entity;
 
 use torii_proto::{
-    Contract, ContractCursor, ContractQuery, Controller, ControllerQuery, Event, EventQuery, Model,
-    Page, Query, Token, TokenBalance, TokenBalanceQuery, TokenContract, TokenContractQuery,
-    TokenQuery, TokenTransfer, TokenTransferQuery, Transaction, TransactionCall, TransactionQuery,
+    Achievement, AchievementQuery, Activity, ActivityQuery, AggregationEntry, AggregationQuery,
+    BalanceId, Contract, ContractCursor, ContractQuery, Controller, ControllerQuery, Event,
+    EventQuery, Model, Page, PlayerAchievementEntry, PlayerAchievementQuery, Query, SearchQuery,
+    SearchResponse, Token, TokenBalance, TokenBalanceQuery, TokenContract, TokenContractQuery,
+    TokenId, TokenQuery, TokenTransfer, TokenTransferQuery, Transaction, TransactionCall,
+    TransactionQuery,
 };
 
 pub mod utils;
@@ -29,14 +32,19 @@ pub trait ReadOnlyStorage: Send + Sync + Debug {
     fn as_read_only(&self) -> &dyn ReadOnlyStorage;
 
     /// Returns the model metadata for the storage.
-    async fn model(&self, model: Felt) -> Result<Model, StorageError>;
+    async fn model(&self, world_address: Felt, model: Felt) -> Result<Model, StorageError>;
 
     /// Returns the models for the storage.
-    /// If selectors is empty, returns all models.
-    async fn models(&self, selectors: &[Felt]) -> Result<Vec<Model>, StorageError>;
+    /// If world_addresses is empty, returns models from all worlds.
+    /// If selectors is empty, returns all models from the specified worlds.
+    async fn models(
+        &self,
+        world_addresses: &[Felt],
+        selectors: &[Felt],
+    ) -> Result<Vec<Model>, StorageError>;
 
     /// Returns the IDs of all the registered tokens
-    async fn token_ids(&self) -> Result<HashSet<String>, StorageError>;
+    async fn token_ids(&self) -> Result<HashSet<TokenId>, StorageError>;
 
     /// Returns the controllers for the storage.
     async fn controllers(&self, query: &ControllerQuery) -> Result<Page<Controller>, StorageError>;
@@ -83,9 +91,36 @@ pub trait ReadOnlyStorage: Send + Sync + Debug {
     /// Returns the model data of an entity.
     async fn entity_model(
         &self,
+        world_address: Felt,
         entity_id: Felt,
         model_selector: Felt,
     ) -> Result<Option<Ty>, StorageError>;
+
+    /// Returns aggregations for the storage.
+    async fn aggregations(
+        &self,
+        query: &AggregationQuery,
+    ) -> Result<Page<AggregationEntry>, StorageError>;
+
+    /// Returns activities for the storage.
+    async fn activities(&self, query: &ActivityQuery) -> Result<Page<Activity>, StorageError>;
+
+    /// Returns achievements with optional filtering by world, namespace, and hidden status.
+    async fn achievements(
+        &self,
+        query: &AchievementQuery,
+    ) -> Result<Page<Achievement>, StorageError>;
+
+    /// Returns player achievement data including stats and progressions.
+    /// Results are paginated by players, ordered by total points descending.
+    async fn player_achievements(
+        &self,
+        query: &PlayerAchievementQuery,
+    ) -> Result<Page<PlayerAchievementEntry>, StorageError>;
+
+    /// Performs a global search across configured tables.
+    /// Searches achievements, controllers, token attributes, entities, and other configured tables.
+    async fn search(&self, query: &SearchQuery) -> Result<SearchResponse, StorageError>;
 }
 
 #[async_trait]
@@ -103,6 +138,7 @@ pub trait Storage: ReadOnlyStorage + Send + Sync + Debug {
     #[allow(clippy::too_many_arguments)]
     async fn register_model(
         &self,
+        world_address: Felt,
         selector: Felt,
         model: &Ty,
         layout: &Layout,
@@ -128,8 +164,10 @@ pub trait Storage: ReadOnlyStorage + Send + Sync + Debug {
     /// Sets an entity with the storage.
     /// It should insert or update the entity if it already exists.
     /// Along with its model state in the model table.
+    #[allow(clippy::too_many_arguments)]
     async fn set_entity(
         &self,
+        world_address: Felt,
         entity: Ty,
         event_id: &str,
         block_timestamp: u64,
@@ -143,6 +181,7 @@ pub trait Storage: ReadOnlyStorage + Send + Sync + Debug {
     /// Along with its model state in the model table.
     async fn set_event_message(
         &self,
+        world_address: Felt,
         entity: Ty,
         event_id: &str,
         block_timestamp: u64,
@@ -154,6 +193,7 @@ pub trait Storage: ReadOnlyStorage + Send + Sync + Debug {
     /// Along with its model state in the model table.
     async fn delete_entity(
         &self,
+        world_address: Felt,
         entity_id: Felt,
         model_id: Felt,
         entity: Ty,
@@ -241,13 +281,12 @@ pub trait Storage: ReadOnlyStorage + Send + Sync + Debug {
 
     /// Stores a token transfer event with the storage.
     #[allow(clippy::too_many_arguments)]
-    async fn store_erc_transfer_event(
+    async fn store_token_transfer(
         &self,
-        contract_address: Felt,
+        token_id: TokenId,
         from: Felt,
         to: Felt,
         amount: U256,
-        token_id: Option<U256>,
         block_timestamp: u64,
         event_id: &str,
     ) -> Result<(), StorageError>;
@@ -255,16 +294,15 @@ pub trait Storage: ReadOnlyStorage + Send + Sync + Debug {
     /// Updates NFT metadata for a specific token.
     async fn update_token_metadata(
         &self,
-        contract_address: Felt,
-        token_id: Option<U256>,
+        token_id: TokenId,
         metadata: String,
     ) -> Result<(), StorageError>;
 
     /// Applies cached balance differences to the storage.
     async fn apply_balances_diff(
         &self,
-        balances_diff: HashMap<String, I256>,
-        total_supply_diff: HashMap<String, I256>,
+        balances_diff: HashMap<BalanceId, I256>,
+        total_supply_diff: HashMap<TokenId, I256>,
         cursors: HashMap<Felt, ContractCursor>,
     ) -> Result<(), StorageError>;
 

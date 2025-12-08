@@ -22,14 +22,14 @@ pub fn utc_dt_string_from_timestamp(timestamp: u64) -> String {
 pub fn felts_to_sql_string(felts: &[Felt]) -> String {
     felts
         .iter()
-        .map(|k| format!("{:#x}", k))
+        .map(felt_to_sql_string)
         .collect::<Vec<String>>()
         .join(SQL_FELT_DELIMITER)
         + SQL_FELT_DELIMITER
 }
 
 pub fn felt_to_sql_string(felt: &Felt) -> String {
-    format!("{:#x}", felt)
+    format!("{:#064x}", felt)
 }
 
 pub fn felt_and_u256_to_sql_string(felt: &Felt, u256: &U256) -> String {
@@ -56,7 +56,7 @@ pub fn build_keys_pattern(clause: &torii_proto::KeysClause) -> String {
             .iter()
             .map(|felt| {
                 if let Some(felt) = felt {
-                    format!("{:#x}", felt)
+                    felt_to_sql_string(felt)
                 } else {
                     KEY_PATTERN.to_string()
                 }
@@ -129,6 +129,94 @@ pub fn map_row_to_json(row: &sqlx::sqlite::SqliteRow) -> serde_json::Value {
     serde_json::Value::Object(obj)
 }
 
+// Map a SQLite row to proto SqlRow type
+pub fn map_row_to_proto(row: &sqlx::sqlite::SqliteRow) -> torii_proto::proto::types::SqlRow {
+    use std::collections::HashMap;
+    use torii_proto::proto::types::{sql_value, SqlValue};
+
+    let mut fields = HashMap::new();
+
+    for (i, column) in row.columns().iter().enumerate() {
+        let value = match column.type_info().name() {
+            "TEXT" => {
+                if let Some(text) = row.get::<Option<String>, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Text(text)),
+                    }
+                } else {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Null(true)),
+                    }
+                }
+            }
+            "INTEGER" => {
+                if let Some(int_val) = row.get::<Option<i64>, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Integer(int_val)),
+                    }
+                } else {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Null(true)),
+                    }
+                }
+            }
+            "REAL" => {
+                if let Some(real_val) = row.get::<Option<f64>, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Real(real_val)),
+                    }
+                } else {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Null(true)),
+                    }
+                }
+            }
+            "BLOB" => {
+                if let Some(blob) = row.get::<Option<Vec<u8>>, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Blob(blob)),
+                    }
+                } else {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Null(true)),
+                    }
+                }
+            }
+            _ => {
+                // Try different types in order
+                if let Ok(val) = row.try_get::<i64, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Integer(val)),
+                    }
+                } else if let Ok(val) = row.try_get::<f64, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Real(val)),
+                    }
+                } else if let Ok(val) = row.try_get::<String, _>(i) {
+                    SqlValue {
+                        value_type: Some(sql_value::ValueType::Text(val)),
+                    }
+                } else {
+                    // Handle or fallback to BLOB
+                    let val = row.get::<Option<Vec<u8>>, _>(i);
+                    if let Some(blob) = val {
+                        SqlValue {
+                            value_type: Some(sql_value::ValueType::Blob(blob)),
+                        }
+                    } else {
+                        SqlValue {
+                            value_type: Some(sql_value::ValueType::Null(true)),
+                        }
+                    }
+                }
+            }
+        };
+        fields.insert(column.name().to_string(), value);
+    }
+
+    torii_proto::proto::types::SqlRow { fields }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
@@ -170,7 +258,14 @@ mod tests {
             models: vec![],
         };
         let pattern = build_keys_pattern(&keys);
-        assert_eq!(pattern, "^0x1/0x2/$");
+        assert_eq!(
+            pattern,
+            format!(
+                "^{}/{}/$",
+                felt_to_sql_string(&Felt::ONE),
+                felt_to_sql_string(&Felt::TWO)
+            )
+        );
     }
 
     #[test]
@@ -181,7 +276,14 @@ mod tests {
             models: vec![],
         };
         let pattern = build_keys_pattern(&keys);
-        assert_eq!(pattern, "^0x1/0x[0-9a-fA-F]+/0x2/$");
+        assert_eq!(
+            pattern,
+            format!(
+                "^{}/0x[0-9a-fA-F]+/{}/$",
+                felt_to_sql_string(&Felt::ONE),
+                felt_to_sql_string(&Felt::TWO)
+            )
+        );
     }
 
     #[test]
@@ -192,7 +294,14 @@ mod tests {
             models: vec![],
         };
         let pattern = build_keys_pattern(&keys);
-        assert_eq!(pattern, "^0x1/0x2(/0x[0-9a-fA-F]+)*/$");
+        assert_eq!(
+            pattern,
+            format!(
+                "^{}/{}(/0x[0-9a-fA-F]+)*/$",
+                felt_to_sql_string(&Felt::ONE),
+                felt_to_sql_string(&Felt::TWO)
+            )
+        );
     }
 
     #[test]
@@ -203,7 +312,13 @@ mod tests {
             models: vec![],
         };
         let pattern = build_keys_pattern(&keys);
-        assert_eq!(pattern, "^0x1/0x[0-9a-fA-F]+(/0x[0-9a-fA-F]+)*/$");
+        assert_eq!(
+            pattern,
+            format!(
+                "^{}/0x[0-9a-fA-F]+(/0x[0-9a-fA-F]+)*/$",
+                felt_to_sql_string(&Felt::ONE)
+            )
+        );
     }
 
     #[test]
@@ -261,7 +376,13 @@ mod tests {
             models: vec![],
         };
         let pattern = build_keys_pattern(&keys);
-        assert_eq!(pattern, "^0x123/$");
+        assert_eq!(
+            pattern,
+            format!(
+                "^{}/$",
+                felt_to_sql_string(&Felt::from_hex("0x123").unwrap())
+            )
+        );
     }
 
     #[test]
@@ -272,7 +393,13 @@ mod tests {
             models: vec![],
         };
         let pattern = build_keys_pattern(&keys);
-        assert_eq!(pattern, "^0x123(/0x[0-9a-fA-F]+)*/$");
+        assert_eq!(
+            pattern,
+            format!(
+                "^{}(/0x[0-9a-fA-F]+)*/$",
+                felt_to_sql_string(&Felt::from_hex("0x123").unwrap())
+            )
+        );
     }
 
     #[test]

@@ -1,12 +1,14 @@
 use chrono::{DateTime, Utc};
 use dojo_types::naming::try_compute_selector_from_tag;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use torii_proto::schema::Entity;
 use torii_proto::{
     Clause, ComparisonOperator, CompositeClause, LogicalOperator, MemberValue, OrderBy,
     OrderDirection, Page, Pagination,
 };
+use torii_storage::utils::format_world_scoped_id;
 use torii_storage::ReadOnlyStorage;
 
 use async_trait::async_trait;
@@ -23,7 +25,7 @@ use starknet::core::types::Felt;
 use super::error::{self, Error};
 use crate::constants::SQL_MAX_JOINS;
 use crate::error::{ParseError, QueryError};
-use crate::utils::build_keys_pattern;
+use crate::utils::{build_keys_pattern, felt_to_sql_string};
 use crate::Sql;
 
 /// Helper function to parse array index from field name like "field[0]"
@@ -130,7 +132,7 @@ impl ModelSQLReader {
             "SELECT namespace, name, class_hash, contract_address, packed_size, unpacked_size, \
              layout FROM models WHERE id = ?",
         )
-        .bind(format!("{:#x}", selector))
+        .bind(felt_to_sql_string(&selector))
         .fetch_one(&pool)
         .await?;
 
@@ -179,7 +181,7 @@ impl ModelReader<Error> for ModelSQLReader {
 
     async fn schema(&self) -> Result<Ty, Error> {
         let schema: String = sqlx::query_scalar("SELECT schema FROM models WHERE id = ?")
-            .bind(format!("{:#x}", self.selector))
+            .bind(felt_to_sql_string(&self.selector))
             .fetch_one(&self.pool)
             .await?;
 
@@ -409,31 +411,31 @@ pub fn map_row_to_ty(
 }
 
 fn map_row_to_entity(
+    schemas: &HashMap<String, Ty>,
     row: &SqliteRow,
-    schemas: &[Ty],
     dont_include_hashed_keys: bool,
 ) -> Result<Entity, Error> {
-    let hashed_keys = Felt::from_str(&row.get::<String, _>("id")).map_err(ParseError::FromStr)?;
+    let hashed_keys =
+        Felt::from_str(&row.get::<String, _>("entity_id")).map_err(ParseError::FromStr)?;
+    let world_address =
+        Felt::from_str(&row.get::<String, _>("world_address")).map_err(ParseError::FromStr)?;
     let created_at = row.get::<DateTime<Utc>, _>("created_at");
     let updated_at = row.get::<DateTime<Utc>, _>("updated_at");
     let executed_at = row.get::<DateTime<Utc>, _>("executed_at");
-    let model_ids = row
+    let model_ids: HashSet<String> = row
         .get::<String, _>("model_ids")
         .split(',')
-        .map(|id| Felt::from_str(id).map_err(ParseError::FromStr))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|id| id.to_string())
+        .collect::<HashSet<_>>();
 
     let models = schemas
         .iter()
-        .try_fold(Vec::new(), |mut acc, schema| {
-            let selector = try_compute_selector_from_tag(&schema.name())
-                .map_err(|_| QueryError::InvalidNamespacedModel(schema.name().to_string()))?;
-
-            if model_ids.contains(&selector) {
-                acc.push(schema);
+        .try_fold(Vec::new(), |mut acc, (id, schema)| {
+            if model_ids.contains(id) {
+                acc.push(schema.clone());
             }
 
-            Ok::<Vec<&dojo_types::schema::Ty>, Error>(acc)
+            Ok::<Vec<dojo_types::schema::Ty>, Error>(acc)
         })?
         .into_iter()
         .map(|schema| {
@@ -444,6 +446,7 @@ fn map_row_to_entity(
         .collect::<Result<Vec<_>, Error>>()?;
 
     Ok(Entity {
+        world_address,
         hashed_keys: if !dont_include_hashed_keys {
             hashed_keys
         } else {
@@ -473,36 +476,53 @@ fn build_composite_clause(
                 let ids = hashed_keys
                     .iter()
                     .map(|id| {
-                        bind_values.push(format!("{:#x}", id));
+                        bind_values.push(felt_to_sql_string(id));
                         "?".to_string()
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                where_clauses.push(format!("({table}.id IN ({}))", ids));
+                where_clauses.push(format!("({table}.entity_id IN ({}))", ids));
             }
             Clause::Keys(keys) => {
                 let keys_pattern = build_keys_pattern(keys);
-                bind_values.push(keys_pattern);
                 let model_selectors: Vec<String> =
                     keys.models.iter().try_fold(Vec::new(), |mut acc, model| {
                         let selector = try_compute_selector_from_tag(model)
                             .map_err(|_| QueryError::InvalidNamespacedModel(model.to_string()))?;
-                        acc.push(format!("{:#x}", selector));
+                        acc.push(felt_to_sql_string(&selector));
                         Ok::<Vec<String>, Error>(acc)
                     })?;
 
                 if model_selectors.is_empty() {
+                    // When no models are specified, apply keys comparison to all models
                     where_clauses.push(format!("({table}.keys REGEXP ?)"));
+                    bind_values.push(keys_pattern);
                 } else {
-                    // Add bind value placeholders for each model selector
-                    let placeholders = vec!["?"; model_selectors.len()].join(", ");
-                    where_clauses.push(format!(
-                        "(({table}.keys REGEXP ? AND {model_relation_table}.model_id IN ({})) OR \
-                         {model_relation_table}.model_id NOT IN ({}))",
-                        placeholders, placeholders
-                    ));
-                    // Add each model selector twice (once for IN and once for NOT IN)
-                    bind_values.extend(model_selectors.clone());
+                    // Only include entities that have at least one of the specified models with matching keys
+                    // Note: Can't use model_ids column directly in WHERE since it's computed via GROUP_CONCAT after WHERE
+                    // Using EXISTS for optimal performance - it's a semi-join that short-circuits on first match
+                    let selector_checks: Vec<String> = (0..model_selectors.len())
+                        .map(|_| format!("{table}.world_address || ':' || ?"))
+                        .collect();
+                    let placeholders = selector_checks.join(", ");
+
+                    if historical {
+                        // For historical queries, filter directly on the historical table
+                        where_clauses.push(format!(
+                            "({table}.keys REGEXP ? AND {table}.model_id IN ({placeholders}))"
+                        ));
+                    } else {
+                        // EXISTS checks if entity has ANY of the specified models with matching keys
+                        // Very efficient with proper indexes: (entity_id, model_id) on entity_model table
+                        where_clauses.push(format!(
+                            "EXISTS (SELECT 1 FROM {model_relation_table} mr \
+                             WHERE mr.entity_id = {table}.id \
+                             AND {table}.keys REGEXP ? \
+                             AND mr.model_id IN ({placeholders}))"
+                        ));
+                    }
+
+                    bind_values.push(keys_pattern);
                     bind_values.extend(model_selectors);
                 }
             }
@@ -638,6 +658,7 @@ impl Sql {
         no_hashed_keys: bool,
         models: Vec<String>,
         historical: bool,
+        world_addresses: &[Felt],
     ) -> Result<Page<Entity>, Error> {
         let models = models.iter().try_fold(Vec::new(), |mut acc, model| {
             let selector = try_compute_selector_from_tag(model)
@@ -646,30 +667,67 @@ impl Sql {
             Ok::<Vec<Felt>, Error>(acc)
         })?;
 
-        let schemas = self
-            .models(&models)
+        let schemas: HashMap<String, Ty> = self
+            .models(world_addresses, &models)
             .await?
             .iter()
-            .map(|m| m.schema.clone())
-            .collect::<Vec<_>>();
+            .map(|m| {
+                (
+                    format_world_scoped_id(&m.world_address, &m.selector),
+                    m.schema.clone(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
-        let (where_clause, bind_values) =
+        let (mut where_clause, mut bind_values) =
             build_composite_clause(table, model_relation_table, composite, historical)?;
 
-        // Convert model Felts to hex strings for SQL binding
-        let model_selectors: Vec<String> =
-            models.iter().map(|model| format!("{:#x}", model)).collect();
+        // Build additional conditions
+        let mut conditions = Vec::new();
+
+        if !where_clause.is_empty() {
+            conditions.push(where_clause.clone());
+        }
+
+        if !world_addresses.is_empty() {
+            let placeholders = vec!["?"; world_addresses.len()].join(", ");
+            conditions.push(format!("{table}.world_address IN ({placeholders})"));
+            bind_values.extend(world_addresses.iter().map(felt_to_sql_string));
+        }
+
+        // Filter by model selectors using the world_address from the entity row
+        // model_id format is: world_address:model_selector
+        // Since we're already filtering entities by world_address, we can construct the model_id dynamically
+        if !models.is_empty() {
+            let model_selector_conditions: Vec<String> = models
+                .iter()
+                .map(|_| {
+                    format!(
+                        "{}.model_id = {}.world_address || ':' || ?",
+                        if historical {
+                            table
+                        } else {
+                            model_relation_table
+                        },
+                        table
+                    )
+                })
+                .collect();
+
+            conditions.push(format!("({})", model_selector_conditions.join(" OR ")));
+            bind_values.extend(models.iter().map(felt_to_sql_string));
+        }
+
+        // Combine all conditions with AND
+        where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            conditions.join(" AND ")
+        };
 
         let page = if historical {
-            self.fetch_historical_entities(
-                table,
-                model_relation_table,
-                &where_clause,
-                bind_values,
-                model_selectors,
-                pagination,
-            )
-            .await?
+            self.fetch_historical_entities(table, &where_clause, bind_values, pagination, &schemas)
+                .await?
         } else {
             let page = self
                 .fetch_entities(
@@ -691,7 +749,7 @@ impl Sql {
                 items: page
                     .items
                     .par_iter()
-                    .map(|row| map_row_to_entity(row, &schemas, no_hashed_keys))
+                    .map(|row| map_row_to_entity(&schemas, row, no_hashed_keys))
                     .collect::<Result<Vec<_>, Error>>()?,
                 next_cursor: page.next_cursor,
             }
@@ -703,48 +761,26 @@ impl Sql {
     async fn fetch_historical_entities(
         &self,
         table: &str,
-        model_relation_table: &str,
         where_clause: &str,
         bind_values: Vec<String>,
-        model_selectors: Vec<String>,
         pagination: Pagination,
+        schemas: &HashMap<String, Ty>,
     ) -> Result<Page<torii_proto::schema::Entity>, Error> {
         use crate::query::{PaginationExecutor, QueryBuilder};
 
         let mut query_builder = QueryBuilder::new(table)
             .select(&[
-                format!("{}.id", table),
-                format!("{}.data", table),
-                format!("{}.model_id", table),
-                format!("{}.event_id", table),
-                format!("{}.created_at", table),
-                format!("{}.updated_at", table),
-                format!("{}.executed_at", table),
-                format!(
-                    "group_concat({}.model_id) as model_ids",
-                    model_relation_table
-                ),
+                format!("{table}.world_address"),
+                format!("{table}.id"),
+                format!("{table}.entity_id"),
+                format!("{table}.data"),
+                format!("{table}.model_id"),
+                format!("{table}.event_id"),
+                format!("{table}.created_at"),
+                format!("{table}.updated_at"),
+                format!("{table}.executed_at"),
             ])
-            .join(&format!(
-                "JOIN {} ON {}.id = {}.entity_id",
-                model_relation_table, table, model_relation_table
-            ))
-            .group_by(&format!("{}.event_id", table));
-
-        if !model_selectors.is_empty() {
-            let placeholders = model_selectors
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ");
-            let model_filter = format!("{}.model_id IN ({})", table, placeholders);
-            query_builder = query_builder.where_clause(&model_filter);
-
-            // Add model selector bind values
-            for selector in &model_selectors {
-                query_builder = query_builder.bind_value(selector.clone());
-            }
-        }
+            .group_by(&format!("{table}.event_id"));
 
         // Add user where clause if provided (applies to already-filtered set)
         if !where_clause.is_empty() {
@@ -774,26 +810,23 @@ impl Sql {
             .items
             .iter()
             .map(|row| async {
-                let id: String = row.get("id");
+                let entity_id: String = row.get("entity_id");
                 let data: String = row.get("data");
-                let model_id: String = row.get("model_id");
+                let model_id: String = row.get::<String, _>("model_id");
                 let created_at: DateTime<Utc> = row.get("created_at");
                 let updated_at: DateTime<Utc> = row.get("updated_at");
                 let executed_at: DateTime<Utc> = row.get("executed_at");
+                let world_address: Felt = Felt::from_str(&row.get::<String, _>("world_address"))
+                    .map_err(ParseError::FromStr)?;
 
-                let hashed_keys = Felt::from_str(&id).map_err(ParseError::FromStr)?;
-                let model = self
-                    .cache
-                    .as_ref()
-                    .expect("Expected cache to be set")
-                    .model(Felt::from_str(&model_id).map_err(ParseError::FromStr)?)
-                    .await?;
-                let mut schema = model.schema;
+                let hashed_keys = Felt::from_str(&entity_id).map_err(ParseError::FromStr)?;
+                let mut schema = schemas.get(&model_id).expect("Model not found").clone();
                 schema.from_json_value(
                     serde_json::from_str(&data).map_err(ParseError::FromJsonStr)?,
                 )?;
 
                 Ok::<_, Error>(torii_proto::schema::Entity {
+                    world_address,
                     hashed_keys,
                     models: vec![schema.as_struct().unwrap().clone()],
                     created_at,
@@ -816,7 +849,7 @@ impl Sql {
     #[allow(clippy::too_many_arguments)]
     pub async fn fetch_entities(
         &self,
-        schemas: &[Ty],
+        schemas: &HashMap<String, Ty>,
         table_name: &str,
         model_relation_table: &str,
         entity_relation_column: &str,
@@ -881,17 +914,7 @@ impl Sql {
         let mut has_more_pages = false;
         let executor = PaginationExecutor::new(self.pool.clone());
 
-        // Compute model selectors for filtering
-        let model_selectors: Vec<String> = schemas
-            .iter()
-            .filter_map(|schema| {
-                try_compute_selector_from_tag(&schema.name())
-                    .ok()
-                    .map(|selector| format!("{:#x}", selector))
-            })
-            .collect();
-
-        for chunk in schemas.chunks(SQL_MAX_JOINS) {
+        for chunk in schemas.values().collect::<Vec<_>>().chunks(SQL_MAX_JOINS) {
             // Strategy: Start from model_relation_table and use index hints for optimal performance
             // The composite index (model_id, entity_id) dramatically reduces the scan size
             // when filtering by model_id on a large entity set
@@ -899,16 +922,15 @@ impl Sql {
 
             // Build selections
             let mut selections = vec![
-                format!("{}.id", table_name),
-                format!("{}.keys", table_name),
-                format!("{}.event_id", table_name),
-                format!("{}.created_at", table_name),
-                format!("{}.updated_at", table_name),
-                format!("{}.executed_at", table_name),
-                format!(
-                    "group_concat({}.model_id) as model_ids",
-                    model_relation_table
-                ),
+                format!("{table_name}.world_address"),
+                format!("{table_name}.id"),
+                format!("{table_name}.entity_id"),
+                format!("{table_name}.keys"),
+                format!("{table_name}.event_id"),
+                format!("{table_name}.created_at"),
+                format!("{table_name}.updated_at"),
+                format!("{table_name}.executed_at"),
+                format!("group_concat({model_relation_table}.model_id) as model_ids"),
             ];
 
             // Join to entities table - SQLite will use idx_entities_event_id_id for ordering
@@ -929,23 +951,6 @@ impl Sql {
             query_builder = query_builder
                 .select(&selections)
                 .group_by(&format!("{}.id", table_name));
-
-            if !model_selectors.is_empty() {
-                let placeholders = model_selectors
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let model_filter =
-                    format!("{}.model_id IN ({})", model_relation_table, placeholders);
-
-                query_builder = query_builder.where_clause(&model_filter);
-
-                // Add model selector bind values
-                for selector in &model_selectors {
-                    query_builder = query_builder.bind_value(selector.clone());
-                }
-            }
 
             // Add user where clause
             if let Some(where_clause) = where_clause {
@@ -1018,12 +1023,12 @@ mod tests {
         let (where_clause, bind_values) =
             build_composite_clause("entities", "entity_model", &composite, false).unwrap();
 
-        assert_eq!(where_clause, "(entities.id IN (?, ?))");
+        assert_eq!(where_clause, "(entities.entity_id IN (?, ?))");
         assert_eq!(
             bind_values,
             hashed_keys
                 .iter()
-                .map(|k| format!("{:#x}", k))
+                .map(felt_to_sql_string)
                 .collect::<Vec<_>>()
         );
     }
@@ -1063,9 +1068,9 @@ mod tests {
             build_composite_clause("entities", "entity_model", &composite, false).unwrap();
 
         assert!(where_clause.contains("entities.keys REGEXP ?"));
-        assert!(where_clause.contains("entity_model.model_id IN"));
-        assert!(where_clause.contains("entity_model.model_id NOT IN"));
-        assert_eq!(bind_values.len(), 5); // keys pattern + 2 model selectors + 2 model selectors again
+        assert!(where_clause.contains("EXISTS"));
+        assert!(where_clause.contains("mr.model_id IN"));
+        assert_eq!(bind_values.len(), 3); // keys pattern + 2 model selectors
     }
 
     #[test]
@@ -1618,7 +1623,7 @@ mod tests {
         let (where_clause, bind_values) =
             build_composite_clause("entities", "entity_model", &composite, false).unwrap();
 
-        assert!(where_clause.contains("(entities.id IN (?))"));
+        assert!(where_clause.contains("(entities.entity_id IN (?))"));
         assert!(where_clause.contains("([Player].[score] = ?)"));
         assert!(where_clause.contains("(entities.keys REGEXP ?)"));
         assert!(where_clause.contains(" AND "));

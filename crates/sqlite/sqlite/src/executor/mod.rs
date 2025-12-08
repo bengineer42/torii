@@ -22,11 +22,12 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 use torii_broker::types::{
-    ContractUpdate, EntityUpdate, EventMessageUpdate, EventUpdate, InnerType, ModelUpdate,
-    TokenBalanceUpdate, TokenTransferUpdate, TokenUpdate, TransactionUpdate, Update,
+    ActivityUpdate, AggregationUpdate, ContractUpdate, EntityUpdate, EventMessageUpdate,
+    EventUpdate, InnerType, ModelUpdate, TokenBalanceUpdate, TokenTransferUpdate, TokenUpdate,
+    TransactionUpdate, Update,
 };
 use torii_math::I256;
-use torii_proto::{ContractCursor, TransactionCall};
+use torii_proto::{BalanceId, ContractCursor, TokenId, TransactionCall};
 use torii_sqlite_types::TokenTransfer as SQLTokenTransfer;
 use tracing::{debug, error, info, warn};
 
@@ -39,6 +40,8 @@ use crate::utils::{
 use crate::SqlConfig;
 use torii_broker::MemoryBroker;
 
+pub mod achievement;
+pub mod activity;
 pub mod aggregator;
 pub mod erc;
 pub mod error;
@@ -70,6 +73,8 @@ pub enum BrokerMessage {
     TokenBalanceUpdated(<TokenBalanceUpdate as InnerType>::Inner),
     TokenTransfer(<TokenTransferUpdate as InnerType>::Inner),
     Transaction(<TransactionUpdate as InnerType>::Inner),
+    AggregationUpdated(<AggregationUpdate as InnerType>::Inner),
+    ActivityUpdated(<ActivityUpdate as InnerType>::Inner),
 }
 
 #[derive(Debug, Clone)]
@@ -83,13 +88,14 @@ pub struct DeleteEntityQuery {
 
 #[derive(Debug, Clone)]
 pub struct ApplyBalanceDiffQuery {
-    pub balances_diff: HashMap<String, I256>,
-    pub total_supply_diff: HashMap<String, I256>,
+    pub balances_diff: HashMap<BalanceId, I256>,
+    pub total_supply_diff: HashMap<TokenId, I256>,
     pub cursors: HashMap<Felt, ContractCursor>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EventMessageQuery {
+    pub world_address: String,
     pub entity_id: String,
     pub model_id: String,
     pub keys_str: String,
@@ -343,7 +349,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 Argument::Int(integer) => query.bind(integer),
                 Argument::Bool(bool) => query.bind(bool),
                 Argument::String(string) => query.bind(string),
-                Argument::FieldElement(felt) => query.bind(format!("{:#x}", felt)),
+                Argument::FieldElement(felt) => query.bind(felt_to_sql_string(felt)),
             }
         }
 
@@ -396,7 +402,7 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                     cursor.last_pending_block_tx = new_cursor
                         .last_pending_block_tx
-                        .map(|tx| format!("{:#x}", tx));
+                        .map(|tx| felt_to_sql_string(&tx));
                     cursor.tps = Some(new_tps.try_into().expect("does't fit in i64"));
                     cursor.last_block_timestamp =
                         Some(new_timestamp.try_into().expect("doesn't fit in i64"));
@@ -466,6 +472,91 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     .await?;
                 }
 
+                // Track activities for WORLD contract interactions
+                // Get the world contract address if this is a WORLD transaction
+                let world_address: Option<String> = sqlx::query_scalar(
+                    "SELECT contract_address FROM contracts 
+                     WHERE contract_address IN (
+                         SELECT contract_address FROM transaction_contract 
+                         WHERE transaction_hash = ?
+                     ) AND contract_type = 'WORLD'
+                     LIMIT 1",
+                )
+                .bind(transaction.transaction_hash.clone())
+                .fetch_optional(&mut **tx)
+                .await?;
+
+                if world_address.is_some()
+                    && self.config.activity_enabled
+                    && !store_transaction.unique_models.is_empty()
+                {
+                    let world_addr = world_address.unwrap();
+
+                    // Get the namespace from the unique models involved in this transaction
+                    // Build a query with placeholders for all model IDs
+                    let model_ids: Vec<String> = store_transaction
+                        .unique_models
+                        .iter()
+                        .map(felt_to_sql_string)
+                        .collect();
+
+                    let placeholders = model_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+                    let query = format!(
+                        "SELECT DISTINCT namespace FROM models WHERE id IN ({})",
+                        placeholders
+                    );
+
+                    let mut query_builder = sqlx::query_scalar(&query);
+                    for model_id in &model_ids {
+                        query_builder = query_builder.bind(model_id);
+                    }
+
+                    let namespaces: Vec<String> = query_builder.fetch_all(&mut **tx).await?;
+
+                    // Track activity for each call, per namespace
+                    let mut activity_updates = Vec::new();
+                    for namespace in &namespaces {
+                        for call in &store_transaction.calls {
+                            let caller_address_str = felt_to_sql_string(&call.caller_address);
+                            match activity::update_activity(
+                                tx,
+                                &world_addr,
+                                namespace,
+                                &caller_address_str,
+                                &call.entrypoint,
+                                transaction.executed_at,
+                                self.config.activity_session_timeout,
+                                &self.config.activity_excluded_entrypoints,
+                            )
+                            .await
+                            {
+                                Ok(Some(activity)) => {
+                                    activity_updates.push(activity);
+                                }
+                                Ok(None) => {
+                                    // Entrypoint was excluded, skip
+                                }
+                                Err(e) => {
+                                    error!(
+                                        target: LOG_TARGET,
+                                        world = %world_addr,
+                                        namespace = %namespace,
+                                        caller = %caller_address_str,
+                                        entrypoint = %call.entrypoint,
+                                        error = ?e,
+                                        "Failed to update activity"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // Publish activity updates
+                    for activity in activity_updates {
+                        self.publish_optimistic_and_queue(BrokerMessage::ActivityUpdated(activity));
+                    }
+                }
+
                 transaction.contract_addresses = store_transaction.contract_addresses;
                 transaction.calls = store_transaction.calls;
                 transaction.unique_models = store_transaction.unique_models;
@@ -496,12 +587,16 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 if entity.is_historical {
                     entity_counter += 1;
 
+                    let (world_address, entity_id) = entity
+                        .entity_id
+                        .split_once(':')
+                        .expect("Invalid world-scoped ID format");
                     let data = serde_json::to_string(&entity.ty.to_json_value()?)
                         .map_err(|e| ExecutorQueryError::Parse(ParseError::FromJsonStr(e)))?;
                     if let Some(keys) = entity.keys_str {
                         sqlx::query(
                             "INSERT INTO entities_historical (id, keys, event_id, data, model_id, \
-                             executed_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+                             executed_at, world_address, entity_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
                         )
                         .bind(entity.entity_id.clone())
                         .bind(keys)
@@ -509,18 +604,22 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                         .bind(data)
                         .bind(entity.model_id.clone())
                         .bind(entity.block_timestamp.clone())
+                        .bind(world_address)
+                        .bind(entity_id)
                         .fetch_one(&mut **tx)
                         .await?;
                     } else {
                         sqlx::query(
                             "INSERT INTO entities_historical (id, event_id, data, model_id, \
-                             executed_at) VALUES (?, ?, ?, ?, ?) RETURNING *",
+                             executed_at, world_address, entity_id) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
                         )
                         .bind(entity.entity_id.clone())
                         .bind(entity.event_id.clone())
                         .bind(data)
                         .bind(entity.model_id.clone())
                         .bind(entity.block_timestamp.clone())
+                        .bind(world_address)
+                        .bind(entity_id)
                         .fetch_one(&mut **tx)
                         .await?;
                     }
@@ -545,8 +644,9 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     .into_iter()
                     .cloned()
                     .collect();
+                let mut aggregation_updates = Vec::new();
                 for aggregator_config in aggregator_configs {
-                    if let Err(e) = aggregator::update_aggregation(
+                    match aggregator::update_aggregation(
                         tx,
                         &aggregator_config,
                         &entity.ty,
@@ -554,13 +654,28 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     )
                     .await
                     {
-                        error!(
-                            target: LOG_TARGET,
-                            aggregator_id = %aggregator_config.id,
-                            error = ?e,
-                            "Failed to update aggregation"
-                        );
+                        Ok(Some(aggregation_entry)) => {
+                            aggregation_updates.push(aggregation_entry);
+                        }
+                        Ok(None) => {
+                            // group_by field could not be extracted, skip
+                        }
+                        Err(e) => {
+                            error!(
+                                target: LOG_TARGET,
+                                aggregator_id = %aggregator_config.id,
+                                error = ?e,
+                                "Failed to update aggregation"
+                            );
+                        }
                     }
+                }
+
+                // Publish aggregation updates
+                for aggregation_entry in aggregation_updates {
+                    self.publish_optimistic_and_queue(BrokerMessage::AggregationUpdated(
+                        aggregation_entry,
+                    ));
                 }
 
                 self.publish_optimistic_and_queue(BrokerMessage::EntityUpdate(
@@ -644,11 +759,15 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 if em_query.is_historical {
                     event_counter += 1;
 
+                    let (world_address, entity_id) = em_query
+                        .entity_id
+                        .split_once(':')
+                        .expect("Invalid world-scoped ID format");
                     let data = serde_json::to_string(&em_query.ty.to_json_value()?)
                         .map_err(|e| ExecutorQueryError::Parse(ParseError::FromJsonStr(e)))?;
                     sqlx::query(
                         "INSERT INTO event_messages_historical (id, keys, event_id, data, \
-                         model_id, executed_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING *",
+                         model_id, executed_at, world_address, entity_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING *",
                     )
                     .bind(em_query.entity_id.clone())
                     .bind(em_query.keys_str.clone())
@@ -656,6 +775,8 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                     .bind(data)
                     .bind(em_query.model_id.clone())
                     .bind(em_query.block_timestamp.clone())
+                    .bind(world_address)
+                    .bind(entity_id)
                     .fetch_one(&mut **tx)
                     .await?;
                 }
@@ -673,6 +794,145 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
 
                 let mut event_message = torii_sqlite_types::Entity::from_row(&event_messages_row)?;
                 event_message.updated_model = Some(em_query.ty.clone());
+
+                // Update aggregations if this model is part of any aggregator configuration
+                let model_tag = em_query.ty.name();
+                let aggregator_configs: Vec<_> = self
+                    .config
+                    .get_aggregator_for_model(&model_tag)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+
+                // Extract achievement config values before any async operations
+                // Handle achievement registration and progression
+                // Extract namespace from model tag (e.g., "nums-TrophyCreation" -> "nums")
+                let (namespace, name) =
+                    model_tag.split_once('-').expect("Invalid model tag format");
+
+                let is_achievement_registration =
+                    self.config.is_achievement_registration_model_name(name);
+                let is_achievement_progression =
+                    self.config.is_achievement_progression_model_name(name);
+
+                let mut aggregation_updates = Vec::new();
+                for aggregator_config in aggregator_configs {
+                    match aggregator::update_aggregation(
+                        tx,
+                        &aggregator_config,
+                        &em_query.ty,
+                        &em_query.model_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(aggregation_entry)) => {
+                            aggregation_updates.push(aggregation_entry);
+                        }
+                        Ok(None) => {
+                            // group_by field could not be extracted, skip
+                        }
+                        Err(e) => {
+                            error!(
+                                target: LOG_TARGET,
+                                aggregator_id = %aggregator_config.id,
+                                error = ?e,
+                                "Failed to update aggregation"
+                            );
+                        }
+                    }
+                }
+
+                // Check if this is an achievement registration model
+                if is_achievement_registration {
+                    match achievement::register_achievement(
+                        tx,
+                        &em_query.world_address,
+                        namespace,
+                        &em_query.ty,
+                    )
+                    .await
+                    {
+                        Ok(Some(achievement_id)) => {
+                            info!(
+                                target: LOG_TARGET,
+                                achievement_id = %achievement_id,
+                                model = %model_tag,
+                                namespace = %namespace,
+                                "Achievement registered"
+                            );
+                        }
+                        Ok(None) => {
+                            debug!(
+                                target: LOG_TARGET,
+                                model = %model_tag,
+                                "Achievement registration returned None"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                target: LOG_TARGET,
+                                model = %model_tag,
+                                error = ?e,
+                                "Failed to register achievement"
+                            );
+                        }
+                    }
+                }
+
+                // Check if this is an achievement progression model
+                if is_achievement_progression {
+                    // Extract achievement_id from the entity
+                    // The achievement_id should be part of the model data
+
+                    match achievement::update_achievement_progression(
+                        tx,
+                        &em_query.world_address,
+                        namespace,
+                        &em_query.ty,
+                    )
+                    .await
+                    {
+                        Ok(Some(progression)) => {
+                            info!(
+                                target: LOG_TARGET,
+                                world = %progression.world_address,
+                                namespace = %progression.namespace,
+                                player_id = %progression.player_id,
+                                task_id = %progression.task_id,
+                                count = %progression.count,
+                                completed = %progression.completed,
+                                "Achievement progression updated"
+                            );
+
+                            // Publish achievement progression update to subscribers
+                            torii_broker::MemoryBroker::<
+                                torii_broker::types::AchievementProgressionUpdate,
+                            >::publish(progression.into());
+                        }
+                        Ok(None) => {
+                            debug!(
+                                target: LOG_TARGET,
+                                model = %model_tag,
+                                "Achievement progression returned None"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                target: LOG_TARGET,
+                                model = %model_tag,
+                                error = ?e,
+                                "Failed to update achievement progression"
+                            );
+                        }
+                    }
+                }
+
+                // Publish aggregation updates
+                for aggregation_entry in aggregation_updates {
+                    self.publish_optimistic_and_queue(BrokerMessage::AggregationUpdated(
+                        aggregation_entry,
+                    ));
+                }
 
                 self.publish_optimistic_and_queue(BrokerMessage::EventMessageUpdate(
                     event_message.into(),
@@ -818,15 +1078,20 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 let token = query.fetch_one(&mut **tx).await?;
 
                 // Store individual token attributes for fast filtering
-                store_token_attributes(&register_nft_token.metadata, &token.id, &mut *tx).await?;
+                if self.config.token_attributes {
+                    store_token_attributes(&register_nft_token.metadata, &token.id, &mut *tx)
+                        .await?;
+                }
 
                 // Extract traits from metadata and update the token contract's traits
-                update_contract_traits_from_metadata(
-                    &register_nft_token.metadata,
-                    &register_nft_token.contract_address,
-                    &mut *tx,
-                )
-                .await?;
+                if self.config.trait_counts {
+                    update_contract_traits_from_metadata(
+                        &register_nft_token.metadata,
+                        &register_nft_token.contract_address,
+                        &mut *tx,
+                    )
+                    .await?;
+                }
 
                 info!(target: LOG_TARGET, name = %name, symbol = %symbol, contract_address = %token.contract_address, token_id = %register_nft_token.token_id, "NFT token registered.");
                 self.publish_optimistic_and_queue(BrokerMessage::TokenRegistered(token.into()));
@@ -863,45 +1128,41 @@ impl<P: Provider + Sync + Send + Clone + 'static> Executor<'_, P> {
                 debug!(target: LOG_TARGET, "Rolled back the transaction.");
             }
             QueryType::UpdateTokenMetadata(update_metadata) => {
-                let id = if let Some(token_id) = update_metadata.token_id {
-                    felt_and_u256_to_sql_string(&update_metadata.contract_address, &token_id)
-                } else {
-                    felt_to_sql_string(&update_metadata.contract_address)
-                };
-
-                // Get the old metadata before updating (needed for trait subtraction)
-                let old_metadata = if update_metadata.token_id.is_some() {
-                    sqlx::query_scalar::<_, String>("SELECT metadata FROM tokens WHERE id = ?")
-                        .bind(&id)
-                        .fetch_optional(&mut **tx)
-                        .await?
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-
                 // Update metadata and timestamp in database
                 let token = sqlx::query_as::<_, torii_sqlite_types::Token>(
                     "UPDATE tokens SET metadata = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? RETURNING *",
                 )
                 .bind(&update_metadata.metadata)
-                .bind(&id)
+                .bind(update_metadata.token_id.to_string())
                 .fetch_one(&mut **tx)
                 .await?;
 
                 // If this is an individual token (has token_id), update attributes and contract's traits
-                if update_metadata.token_id.is_some() {
+                if update_metadata.token_id.is_nft() {
+                    // Get the old metadata before updating (needed for trait subtraction)
+                    let old_metadata =
+                        sqlx::query_scalar::<_, String>("SELECT metadata FROM tokens WHERE id = ?")
+                            .bind(update_metadata.token_id.to_string())
+                            .fetch_optional(&mut **tx)
+                            .await?
+                            .unwrap_or_default();
+
                     // Update individual token attributes
-                    store_token_attributes(&update_metadata.metadata, &token.id, &mut *tx).await?;
+                    if self.config.token_attributes {
+                        store_token_attributes(&update_metadata.metadata, &token.id, &mut *tx)
+                            .await?;
+                    }
 
                     // Update contract's traits with proper subtraction of old traits and addition of new traits
-                    update_contract_traits_on_metadata_change(
-                        &old_metadata,
-                        &update_metadata.metadata,
-                        &update_metadata.contract_address,
-                        &mut *tx,
-                    )
-                    .await?;
+                    if self.config.trait_counts {
+                        update_contract_traits_on_metadata_change(
+                            &old_metadata,
+                            &update_metadata.metadata,
+                            &update_metadata.token_id.contract_address(),
+                            &mut *tx,
+                        )
+                        .await?;
+                    }
                 }
 
                 info!(target: LOG_TARGET, name = %token.name, symbol = %token.symbol, contract_address = %token.contract_address, token_id = ?update_metadata.token_id, "Token metadata updated.");
@@ -1047,6 +1308,12 @@ fn send_broker_message(message: BrokerMessage, optimistic: bool) {
         }
         BrokerMessage::Transaction(transaction) => {
             MemoryBroker::publish(Update::new(transaction, optimistic))
+        }
+        BrokerMessage::AggregationUpdated(aggregation) => {
+            MemoryBroker::publish(Update::new(aggregation, optimistic))
+        }
+        BrokerMessage::ActivityUpdated(activity) => {
+            MemoryBroker::publish(Update::new(activity, optimistic))
         }
     }
 }

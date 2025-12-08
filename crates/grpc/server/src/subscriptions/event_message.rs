@@ -8,9 +8,8 @@ use dojo_types::schema::Ty;
 use futures::Stream;
 use futures_util::StreamExt;
 use rand::Rng;
-use tokio::sync::mpsc::{
-    channel, unbounded_channel, Receiver, Sender, UnboundedReceiver, UnboundedSender,
-};
+use starknet_crypto::Felt;
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use torii_broker::types::EventMessageUpdate;
 use torii_broker::MemoryBroker;
 use torii_proto::schema::EntityWithMetadata;
@@ -29,6 +28,8 @@ pub(crate) const LOG_TARGET: &str = "torii::grpc::server::subscriptions::event_m
 pub struct EventMessageSubscriber {
     /// The clause that the subscriber is interested in
     pub(crate) clause: Option<Clause>,
+    /// The world addresses that the subscriber is interested in
+    pub(crate) world_addresses: Vec<Felt>,
     /// The channel to send the response back to the subscriber.
     pub(crate) sender: Sender<Result<SubscribeEntityResponse, tonic::Status>>,
 }
@@ -50,6 +51,7 @@ impl EventMessageManager {
     pub async fn add_subscriber(
         &self,
         clause: Option<Clause>,
+        world_addresses: Vec<Felt>,
     ) -> Receiver<Result<SubscribeEntityResponse, tonic::Status>> {
         let subscription_id = rand::thread_rng().gen::<u64>();
         let (sender, receiver) = channel(self.config.subscription_buffer_size);
@@ -64,18 +66,31 @@ impl EventMessageManager {
             }))
             .await;
 
-        self.subscribers
-            .insert(subscription_id, EventMessageSubscriber { clause, sender });
+        self.subscribers.insert(
+            subscription_id,
+            EventMessageSubscriber {
+                clause,
+                world_addresses,
+                sender,
+            },
+        );
 
         receiver
     }
 
-    pub async fn update_subscriber(&self, id: u64, clause: Option<Clause>) {
+    pub async fn update_subscriber(
+        &self,
+        id: u64,
+        clause: Option<Clause>,
+        world_addresses: Vec<Felt>,
+    ) {
         if let Some(mut subscriber) = self.subscribers.get_mut(&id) {
             subscriber.clause = clause;
+            subscriber.world_addresses = world_addresses;
         }
     }
 
+    #[allow(dead_code)]
     pub(super) async fn remove_subscriber(&self, id: u64) {
         self.subscribers.remove(&id);
     }
@@ -85,39 +100,23 @@ impl EventMessageManager {
 #[allow(missing_debug_implementations)]
 pub struct Service {
     simple_broker: Pin<Box<dyn Stream<Item = EntityWithMetadata<true>> + Send>>,
-    event_sender: UnboundedSender<EntityWithMetadata<true>>,
+    subs_manager: Arc<EventMessageManager>,
 }
 
 impl Service {
     pub fn new(subs_manager: Arc<EventMessageManager>) -> Self {
-        let (event_sender, event_receiver) = unbounded_channel();
-        let service = Self {
+        Self {
             simple_broker: if subs_manager.config.optimistic {
                 Box::pin(MemoryBroker::<EventMessageUpdate>::subscribe_optimistic())
             } else {
                 Box::pin(MemoryBroker::<EventMessageUpdate>::subscribe())
             },
-            event_sender,
-        };
-
-        tokio::spawn(Self::publish_updates(subs_manager, event_receiver));
-
-        service
-    }
-
-    async fn publish_updates(
-        subs: Arc<EventMessageManager>,
-        mut event_receiver: UnboundedReceiver<EntityWithMetadata<true>>,
-    ) {
-        while let Some(event) = event_receiver.recv().await {
-            Self::process_event_update(&subs, &event).await;
+            subs_manager,
         }
     }
 
-    async fn process_event_update(
-        subs: &Arc<EventMessageManager>,
-        event: &EntityWithMetadata<true>,
-    ) {
+    // Process updates synchronously - no async overhead
+    fn process_event_message(subs: &EventMessageManager, event: &EntityWithMetadata<true>) {
         let mut closed_stream = Vec::new();
 
         for sub in subs.subscribers.iter() {
@@ -125,12 +124,13 @@ impl Service {
             let sub = sub.value();
 
             // Check if the subscriber is interested in this entity
-            // If we have a clause of hashed keys, then check that the id of the entity
-            // is in the list of hashed keys.
-
-            // If we have a clause of keys, then check that the key pattern of the entity
-            // matches the key pattern of the subscriber.
             if let Some(clause) = &sub.clause {
+                if !sub.world_addresses.is_empty()
+                    && !sub.world_addresses.contains(&event.entity.world_address)
+                {
+                    continue;
+                }
+
                 if !match_entity(
                     event.entity.hashed_keys,
                     &event.keys,
@@ -149,23 +149,25 @@ impl Service {
             // Use try_send to avoid blocking on slow subscribers
             match sub.sender.try_send(Ok(resp)) {
                 Ok(_) => {
-                    // Message sent successfully
+                    trace!(target = LOG_TARGET, subscription_id = %idx, "Event message update sent to subscriber");
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    // Channel is full, subscriber is too slow - disconnect them
-                    trace!(target = LOG_TARGET, subscription_id = %idx, "Disconnecting slow subscriber - channel full");
+                    error!(target = LOG_TARGET, subscription_id = %idx, entity_id = ?event.entity.hashed_keys, "Disconnecting slow subscriber - channel full");
                     closed_stream.push(*idx);
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    // Channel is closed, subscriber has disconnected
+                    trace!(target = LOG_TARGET, subscription_id = %idx, "Subscriber channel closed");
                     closed_stream.push(*idx);
                 }
             }
         }
 
-        for id in closed_stream {
-            trace!(target = LOG_TARGET, id = %id, "Closing entity stream.");
-            subs.remove_subscriber(id).await
+        // Clean up closed subscribers
+        if !closed_stream.is_empty() {
+            for id in closed_stream {
+                trace!(target = LOG_TARGET, id = %id, "Removing closed subscriber.");
+                subs.subscribers.remove(&id);
+            }
         }
     }
 }
@@ -176,10 +178,9 @@ impl Future for Service {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
 
+        // Process updates inline for minimum latency
         while let Poll::Ready(Some(event)) = this.simple_broker.poll_next_unpin(cx) {
-            if let Err(e) = this.event_sender.send(event) {
-                error!(target = LOG_TARGET, error = ?e, "Sending event update to processor.");
-            }
+            Self::process_event_message(&this.subs_manager, &event);
         }
 
         Poll::Pending

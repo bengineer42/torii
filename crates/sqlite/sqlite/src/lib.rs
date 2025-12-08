@@ -39,6 +39,22 @@ pub struct SqlConfig {
     pub aggregators: Vec<AggregatorConfig>,
     pub wal_truncate_size_threshold: u64,
     pub optimize_interval: u64,
+    // Activity tracking configuration
+    pub activity_enabled: bool,
+    pub activity_session_timeout: u64,
+    pub activity_excluded_entrypoints: HashSet<String>,
+    // ERC tracking configuration
+    pub token_attributes: bool,
+    pub trait_counts: bool,
+    // Achievement tracking configuration
+    pub achievement_registration_model_name: String,
+    pub achievement_progression_model_name: String,
+    // Search configuration
+    pub search_max_results: usize,
+    pub search_min_query_length: usize,
+    pub search_prefix_matching: bool,
+    pub search_return_snippets: bool,
+    pub search_snippet_length: usize,
 }
 
 impl SqlConfig {
@@ -51,6 +67,14 @@ impl SqlConfig {
             .iter()
             .filter(|agg| agg.model_tag == model_tag)
             .collect()
+    }
+
+    pub fn is_achievement_registration_model_name(&self, model_name: &str) -> bool {
+        self.achievement_registration_model_name == model_name
+    }
+
+    pub fn is_achievement_progression_model_name(&self, model_name: &str) -> bool {
+        self.achievement_progression_model_name == model_name
     }
 }
 

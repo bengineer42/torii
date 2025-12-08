@@ -6,7 +6,8 @@ use dojo_world::contracts::abigen::world::Event as WorldEvent;
 use starknet::core::types::{Event, Felt};
 use starknet::providers::Provider;
 use starknet_crypto::poseidon_hash_many;
-use tracing::info;
+use torii_cache::CacheError;
+use tracing::{debug, info};
 
 use crate::error::Error;
 use crate::task_manager::TaskId;
@@ -33,6 +34,7 @@ where
 
     fn task_identifier(&self, event: &Event) -> TaskId {
         let mut hasher = DefaultHasher::new();
+        event.from_address.hash(&mut hasher);
         let keys = Vec::<Felt>::cairo_deserialize(&event.data, 0).unwrap_or_else(|e| {
             panic!("Expected EventEmitted keys to be well formed: {:?}", e);
         });
@@ -46,6 +48,7 @@ where
 
     fn task_dependencies(&self, event: &Event) -> Vec<TaskId> {
         let mut hasher = DefaultHasher::new();
+        event.from_address.hash(&mut hasher);
         // selector
         event.keys[1].hash(&mut hasher);
         vec![hasher.finish()]
@@ -79,9 +82,17 @@ where
         };
 
         // silently ignore if the model is not found
-        let model = match ctx.cache.model(event.selector).await {
+        let model = match ctx.cache.model(ctx.contract_address, event.selector).await {
             Ok(model) => model,
-            Err(_) => return Ok(()),
+            Err(CacheError::ModelNotFound(_)) if !ctx.config.namespaces.is_empty() => {
+                debug!(
+                    target: LOG_TARGET,
+                    selector = %event.selector,
+                    "Model not found in cache, skipping. This can happen if only specific namespaces are indexed."
+                );
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
         };
 
         info!(
@@ -98,7 +109,13 @@ where
         entity.deserialize(&mut keys_and_unpacked, model.use_legacy_store)?;
 
         ctx.storage
-            .set_event_message(entity, &ctx.event_id, ctx.block_timestamp, event.keys)
+            .set_event_message(
+                ctx.contract_address,
+                entity,
+                &ctx.event_id,
+                ctx.block_timestamp,
+                event.keys,
+            )
             .await?;
 
         // Record successful event message storage with context

@@ -8,6 +8,7 @@ use dojo_world::contracts::model::{ModelError, ModelRPCReader, ModelReader};
 use dojo_world::contracts::WorldContractReader;
 use starknet::core::types::{BlockId, Event, StarknetError};
 use starknet::providers::{Provider, ProviderError};
+use torii_cache::CacheError;
 use torii_proto::Model;
 use tracing::{debug, info};
 
@@ -37,6 +38,7 @@ where
 
     fn task_identifier(&self, event: &Event) -> TaskId {
         let mut hasher = DefaultHasher::new();
+        event.from_address.hash(&mut hasher);
         event.keys[1].hash(&mut hasher); // Use the model selector to create a unique ID
         hasher.finish()
     }
@@ -58,13 +60,13 @@ where
 
         // If the model does not exist, silently ignore it.
         // This can happen if only specific namespaces are indexed.
-        let model = match ctx.cache.model(event.selector).await {
+        let model = match ctx.cache.model(ctx.contract_address, event.selector).await {
             Ok(m) => m,
-            Err(e) if e.to_string().contains("no rows") => {
+            Err(CacheError::ModelNotFound(_)) if !ctx.config.namespaces.is_empty() => {
                 debug!(
                     target: LOG_TARGET,
                     selector = %event.selector,
-                    "Model does not exist, skipping."
+                    "Model not found in cache, skipping. This can happen if only specific namespaces are indexed."
                 );
                 return Ok(());
             }
@@ -140,6 +142,7 @@ where
 
         ctx.storage
             .register_model(
+                ctx.contract_address,
                 event.selector,
                 &new_schema,
                 &layout,
@@ -158,8 +161,10 @@ where
 
         ctx.cache
             .register_model(
+                ctx.contract_address,
                 event.selector,
                 Model {
+                    world_address: ctx.contract_address,
                     selector: event.selector,
                     namespace,
                     name,

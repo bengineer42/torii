@@ -64,6 +64,14 @@ pub struct ToriiArgs {
 
     #[command(flatten)]
     #[merge]
+    pub activity: ActivityOptions,
+
+    #[command(flatten)]
+    #[merge]
+    pub achievement: AchievementOptions,
+
+    #[command(flatten)]
+    #[merge]
     pub snapshot: SnapshotOptions,
 
     #[cfg(feature = "server")]
@@ -90,6 +98,11 @@ pub struct ToriiArgs {
     #[command(flatten)]
     #[merge]
     pub messaging: MessagingOptions,
+
+    #[cfg(feature = "server")]
+    #[command(flatten)]
+    #[merge]
+    pub search: SearchOptions,
 }
 
 impl Default for ToriiArgs {
@@ -104,6 +117,8 @@ impl Default for ToriiArgs {
             events: EventsOptions::default(),
             erc: ErcOptions::default(),
             sql: SqlOptions::default(),
+            activity: ActivityOptions::default(),
+            achievement: AchievementOptions::default(),
             snapshot: SnapshotOptions::default(),
             runner: RunnerOptions::default(),
             #[cfg(feature = "server")]
@@ -116,6 +131,8 @@ impl Default for ToriiArgs {
             grpc: GrpcOptions::default(),
             #[cfg(feature = "server")]
             messaging: MessagingOptions::default(),
+            #[cfg(feature = "server")]
+            search: SearchOptions::default(),
         }
     }
 }

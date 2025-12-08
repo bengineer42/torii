@@ -36,7 +36,9 @@ impl fmt::LowerHex for SQLFelt {
 #[derive(FromRow, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Entity {
-    pub id: String,
+    pub id: String,        // Composite: "world_address:entity_id"
+    pub entity_id: String, // Just the entity hash (for easy access)
+    pub world_address: String,
     pub keys: String,
     pub event_id: String,
     pub executed_at: DateTime<Utc>,
@@ -58,8 +60,10 @@ impl<const EVENT_MESSAGE: bool> From<Entity> for torii_proto::schema::Entity<EVE
             vec![value.updated_model.unwrap().as_struct().unwrap().clone()]
         };
 
+        // Use the dedicated entity_id column (no parsing needed!)
         Self {
-            hashed_keys: Felt::from_str(&value.id).unwrap(),
+            hashed_keys: Felt::from_str(&value.entity_id).unwrap(),
+            world_address: Felt::from_str(&value.world_address).unwrap(),
             models,
             created_at: value.created_at,
             updated_at: value.updated_at,
@@ -92,7 +96,9 @@ impl<const EVENT_MESSAGE: bool> From<Entity> for EntityWithMetadata<EVENT_MESSAG
 #[derive(FromRow, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
-    pub id: String,
+    pub id: String,             // Composite: "world_address:model_selector"
+    pub model_selector: String, // Just the model selector (for easy access)
+    pub world_address: String,  // The world address (for filtering)
     pub namespace: String,
     pub name: String,
     pub class_hash: String,
@@ -109,9 +115,10 @@ pub struct Model {
 impl From<Model> for torii_proto::Model {
     fn from(value: Model) -> Self {
         Self {
+            world_address: Felt::from_str(&value.world_address).unwrap(),
             namespace: value.namespace,
             name: value.name,
-            selector: Felt::from_str(&value.id).unwrap(),
+            selector: Felt::from_str(&value.model_selector).unwrap(),
             class_hash: Felt::from_str(&value.class_hash).unwrap(),
             contract_address: Felt::from_str(&value.contract_address).unwrap(),
             layout: serde_json::from_str(&value.layout).unwrap(),
@@ -132,6 +139,39 @@ pub struct Event {
     pub transaction_hash: String,
     pub executed_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Activity {
+    pub id: String,
+    pub world_address: String,
+    pub namespace: String,
+    pub caller_address: String,
+    pub session_start: DateTime<Utc>,
+    pub session_end: DateTime<Utc>,
+    pub action_count: i32,
+    pub actions: String, // JSON string
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<Activity> for torii_proto::Activity {
+    fn from(value: Activity) -> Self {
+        use std::collections::HashMap;
+        let actions: HashMap<String, u32> =
+            serde_json::from_str(&value.actions).unwrap_or_default();
+        Self {
+            id: value.id,
+            world_address: Felt::from_hex(&value.world_address).unwrap(),
+            namespace: value.namespace,
+            caller_address: Felt::from_hex(&value.caller_address).unwrap(),
+            session_start: value.session_start,
+            session_end: value.session_end,
+            action_count: value.action_count as u32,
+            actions,
+            updated_at: value.updated_at,
+        }
+    }
 }
 
 impl From<Event> for torii_proto::EventWithMetadata {
@@ -416,13 +456,64 @@ impl From<Contract> for torii_proto::Contract {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct AggregatorConfig {
     pub id: String,
     pub model_tag: String,
-    pub group_by: String,
+    #[serde(deserialize_with = "deserialize_group_by")]
+    pub group_by: Vec<String>,
     pub aggregation: Aggregation,
     pub order: SortOrder,
+}
+
+// Custom deserializer to handle both single string and array for group_by
+fn deserialize_group_by<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_json::Value;
+
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => Ok(vec![s]),
+        Value::Array(arr) => arr
+            .into_iter()
+            .map(|v| match v {
+                Value::String(s) => Ok(s),
+                _ => Err(D::Error::custom("group_by array must contain only strings")),
+            })
+            .collect(),
+        _ => Err(D::Error::custom(
+            "group_by must be a string or array of strings",
+        )),
+    }
+}
+
+impl<'de> Deserialize<'de> for AggregatorConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct AggregatorConfigHelper {
+            id: String,
+            model_tag: String,
+            #[serde(deserialize_with = "deserialize_group_by")]
+            group_by: Vec<String>,
+            aggregation: Aggregation,
+            order: SortOrder,
+        }
+
+        let helper = AggregatorConfigHelper::deserialize(deserializer)?;
+        Ok(AggregatorConfig {
+            id: helper.id,
+            model_tag: helper.model_tag,
+            group_by: helper.group_by,
+            aggregation: helper.aggregation,
+            order: helper.order,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -461,4 +552,107 @@ pub struct AggregationEntry {
     /// Only used for Avg aggregation to track sum and count
     #[sqlx(default)]
     pub metadata: Option<String>,
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AggregationEntryWithPosition {
+    pub id: String,
+    pub aggregator_id: String,
+    pub entity_id: String,
+    pub value: String,
+    pub display_value: String,
+    pub model_id: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub position: i64,
+}
+
+impl From<AggregationEntryWithPosition> for torii_proto::AggregationEntry {
+    fn from(value: AggregationEntryWithPosition) -> Self {
+        Self {
+            id: value.id,
+            aggregator_id: value.aggregator_id,
+            entity_id: value.entity_id,
+            value: U256::from_be_hex(value.value.trim_start_matches("0x")),
+            display_value: value.display_value,
+            model_id: value.model_id,
+            created_at: value.created_at,
+            updated_at: value.updated_at,
+            position: value.position as u64,
+        }
+    }
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct Achievement {
+    pub id: String,
+    pub world_address: String,
+    pub hidden: i32,
+    pub index_num: i32,
+    pub points: i32,
+    pub start: String,
+    pub end: String,
+    pub group_name: String,
+    pub icon: String,
+    pub title: String,
+    pub description: String,
+    pub tasks: String,        // JSON string
+    pub data: Option<String>, // Optional JSON string
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AchievementProgression {
+    pub id: String,
+    pub task_id: String,
+    pub world_address: String,
+    pub namespace: String,
+    pub player_id: String,
+    pub count: i32,
+    pub completed: i32,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AchievementTask {
+    pub id: String,
+    pub achievement_id: String,
+    pub task_id: String,
+    pub world_address: String,
+    pub namespace: String,
+    pub description: String,
+    pub total: i32,
+    pub total_completions: i32,
+    pub completion_rate: f64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(FromRow, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayerAchievementStats {
+    pub id: String,
+    pub world_address: String,
+    pub namespace: String,
+    pub player_id: String,
+    pub total_points: i32,
+    pub completed_achievements: i32,
+    pub total_achievements: i32,
+    pub completion_percentage: f64,
+    pub last_achievement_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AchievementConfig {
+    pub registration_model: String,
+    pub progression_model: String,
+    pub additional_progression_models: Vec<String>,
 }

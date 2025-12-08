@@ -26,7 +26,7 @@ pub const DEFAULT_RELAY_WEBRTC_PORT: u16 = 9091;
 pub const DEFAULT_RELAY_WEBSOCKET_PORT: u16 = 9092;
 pub const DEFAULT_GRPC_ADDR: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 pub const DEFAULT_GRPC_PORT: u16 = 50051;
-pub const DEFAULT_GRPC_SUBSCRIPTION_BUFFER_SIZE: usize = 256;
+pub const DEFAULT_GRPC_SUBSCRIPTION_BUFFER_SIZE: usize = 16384;
 pub const DEFAULT_GRPC_TCP_KEEPALIVE_SECS: u64 = 60;
 pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_GRPC_HTTP2_KEEPALIVE_TIMEOUT_SECS: u64 = 10;
@@ -44,6 +44,26 @@ pub const DEFAULT_DATABASE_IDLE_TIMEOUT: u64 = 600_000;
 pub const DEFAULT_DATABASE_MAX_CONNECTIONS: u32 = 100;
 pub const DEFAULT_MESSAGING_MAX_AGE: u64 = 300_000;
 pub const DEFAULT_MESSAGING_FUTURE_TOLERANCE: u64 = 60_000;
+
+// Activity tracking defaults
+/// Default session timeout in seconds (1 hour)
+pub const DEFAULT_ACTIVITY_SESSION_TIMEOUT: u64 = 3600;
+/// Default days to keep activity records (30 days)
+pub const DEFAULT_ACTIVITY_RETENTION_DAYS: u64 = 30;
+
+// Achievement tracking defaults
+/// Default model tag for achievement registration (trophy creation)
+pub const DEFAULT_ACHIEVEMENT_REGISTRATION_MODEL_NAME: &str = "TrophyCreation";
+/// Default model tag for achievement progression (trophy progression)
+pub const DEFAULT_ACHIEVEMENT_PROGRESSION_MODEL_NAME: &str = "TrophyProgression";
+
+// Search API defaults
+/// Default maximum number of search results to return per table
+pub const DEFAULT_SEARCH_MAX_RESULTS: usize = 100;
+/// Default minimum search query length
+pub const DEFAULT_SEARCH_MIN_QUERY_LENGTH: usize = 2;
+/// Default snippet length for search result highlighting
+pub const DEFAULT_SEARCH_SNIPPET_LENGTH: usize = 64;
 
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
 #[serde(default)]
@@ -388,6 +408,50 @@ pub struct ErcOptions {
     /// Path to a directory to store ERC artifacts
     #[arg(long)]
     pub artifacts_path: Option<Utf8PathBuf>,
+
+    /// Whether or not to index ERC721 and ERC1155 token attributes
+    #[arg(
+        long = "erc.token_attributes",
+        default_value_t = true,
+        help = "Whether or not to index ERC721 and ERC1155 token attributes."
+    )]
+    pub token_attributes: bool,
+
+    /// Whether or not to index ERC721 and ERC1155 trait counts
+    #[arg(
+        long = "erc.trait_counts",
+        default_value_t = false,
+        help = "Whether or not to index ERC721 and ERC1155 trait counts."
+    )]
+    pub trait_counts: bool,
+
+    /// Whether to process ERC-4906 metadata update events globally
+    #[arg(
+        long = "erc.metadata_updates",
+        default_value_t = true,
+        help = "Whether to process ERC-4906 metadata update events (MetadataUpdate, BatchMetadataUpdate). When false, all metadata updates are ignored."
+    )]
+    pub metadata_updates: bool,
+
+    /// Whitelist of contract addresses that should process metadata updates.
+    /// If empty, all contracts are allowed (subject to metadata_updates flag).
+    /// Format: comma-separated list of contract addresses in hex.
+    #[arg(
+        long = "erc.metadata_update_whitelist",
+        value_delimiter = ',',
+        help = "Whitelist of contract addresses (hex) that should process metadata updates. If empty, all contracts are allowed."
+    )]
+    pub metadata_update_whitelist: Vec<String>,
+
+    /// Blacklist of contract addresses that should NOT process metadata updates.
+    /// Takes precedence over whitelist.
+    /// Format: comma-separated list of contract addresses in hex.
+    #[arg(
+        long = "erc.metadata_update_blacklist",
+        value_delimiter = ',',
+        help = "Blacklist of contract addresses (hex) that should NOT process metadata updates. Takes precedence over whitelist."
+    )]
+    pub metadata_update_blacklist: Vec<String>,
 }
 
 impl Default for ErcOptions {
@@ -395,7 +459,47 @@ impl Default for ErcOptions {
         Self {
             max_metadata_tasks: DEFAULT_ERC_MAX_METADATA_TASKS,
             artifacts_path: None,
+            token_attributes: true,
+            trait_counts: false,
+            metadata_updates: true,
+            metadata_update_whitelist: vec![],
+            metadata_update_blacklist: vec![],
         }
+    }
+}
+
+impl ErcOptions {
+    /// Check if a contract address should process metadata updates
+    pub fn should_process_metadata_updates(&self, contract_address: &Felt) -> bool {
+        // If metadata updates are globally disabled, return false
+        if !self.metadata_updates {
+            return false;
+        }
+
+        let address_str = format!("{:#x}", contract_address);
+
+        // Check blacklist first (takes precedence)
+        if self.metadata_update_blacklist.iter().any(|addr| {
+            addr.trim().eq_ignore_ascii_case(&address_str)
+                || addr
+                    .trim()
+                    .eq_ignore_ascii_case(&format!("{:x}", contract_address))
+        }) {
+            return false;
+        }
+
+        // If whitelist is empty, allow all (except blacklisted)
+        if self.metadata_update_whitelist.is_empty() {
+            return true;
+        }
+
+        // Check if address is in whitelist
+        self.metadata_update_whitelist.iter().any(|addr| {
+            addr.trim().eq_ignore_ascii_case(&address_str)
+                || addr
+                    .trim()
+                    .eq_ignore_ascii_case(&format!("{:x}", contract_address))
+        })
     }
 }
 
@@ -438,14 +542,20 @@ impl Default for MessagingOptions {
     }
 }
 
-pub const DEFAULT_DATABASE_PAGE_SIZE: u64 = 32_768;
+pub const DEFAULT_DATABASE_PAGE_SIZE: u64 = 4096;
 /// Negative value is used to determine number of KiB to use for cache. Currently set as 512MB, 25%
 /// of the RAM of the smallest slot instance.
 pub const DEFAULT_DATABASE_CACHE_SIZE: i64 = -500_000;
 /// Default soft memory limit in bytes (1GB)
 pub const DEFAULT_DATABASE_SOFT_MEMORY_LIMIT: u64 = 1024 * 1024 * 1024;
 /// Default hard memory limit in bytes (2GB)
-pub const DEFAULT_DATABASE_HARD_MEMORY_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_DATABASE_HARD_MEMORY_LIMIT: u64 = 0;
+/// Default memory-mapped I/O size in bytes (256MB)
+pub const DEFAULT_DATABASE_MMAP_SIZE: u64 = 256 * 1024 * 1024;
+/// Default journal size limit in bytes (64MB)
+pub const DEFAULT_DATABASE_JOURNAL_SIZE_LIMIT: u64 = 64 * 1024 * 1024;
+/// Default temporary storage location for SQLite.
+pub const DEFAULT_DATABASE_TEMP_STORE: &str = "file";
 
 #[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
 #[serde(default)]
@@ -521,9 +631,10 @@ pub struct SqlOptions {
         value_delimiter = ';',
         value_parser = parse_aggregator_config,
         help = "Aggregator configurations. Format: \"aggregator_id:model_tag:group_by:aggregation:order\". \
+                group_by can be comma-separated for multiple fields (e.g., 'player,task_id'). \
                 Aggregation can be: field_name (latest value), +1/count (count events), max:field (highest), min:field (lowest), sum:field (accumulate), avg:field (average). \
                 Order can be 'asc' or 'desc'. Multiple configs separated by ';'. \
-                Examples: 'top_scores:ns-Player:player:score:desc' or 'most_wins:ns-GameWon:player:+1:desc' or 'avg_score:ns-Game:player:avg:score:desc'"
+                Examples: 'top_scores:ns-Player:player:score:desc' or 'progression:ns-Trophy:player,task:+1:desc' or 'avg_score:ns-Game:player:avg:score:desc'"
     )]
     pub aggregators: Vec<AggregatorConfig>,
 
@@ -608,6 +719,45 @@ pub struct SqlOptions {
                 abort operations to prevent excessive memory usage."
     )]
     pub hard_memory_limit: u64,
+
+    /// Shared cache mode for SQLite.
+    #[arg(
+        long = "sql.shared_cache",
+        default_value_t = false,
+        help = "Shared cache mode for SQLite. When enabled, SQLite will use a shared cache for all connections."
+    )]
+    pub shared_cache: bool,
+
+    /// Temporary storage location for SQLite.
+    #[arg(
+        long = "sql.temp_store",
+        default_value = DEFAULT_DATABASE_TEMP_STORE,
+        help = "Temporary storage location for SQLite. Options: 'default', 'file', 'memory'. \
+                'memory' stores temp tables in RAM (faster but uses more memory). \
+                'file' stores them on disk (slower but uses less memory). \
+                Use 'file' on memory-constrained systems."
+    )]
+    pub temp_store: String,
+
+    /// Memory-mapped I/O size in bytes for SQLite.
+    #[arg(
+        long = "sql.mmap_size",
+        default_value_t = DEFAULT_DATABASE_MMAP_SIZE,
+        help = "Memory-mapped I/O size in bytes for SQLite. Default is 256MB. \
+                Memory mapping can improve performance but uses RAM. \
+                Set to 0 to disable or reduce on memory-constrained systems."
+    )]
+    pub mmap_size: u64,
+
+    /// Journal size limit in bytes for SQLite.
+    #[arg(
+        long = "sql.journal_size_limit",
+        default_value_t = DEFAULT_DATABASE_JOURNAL_SIZE_LIMIT,
+        help = "Journal size limit in bytes for SQLite. Default is 64MB. \
+                Limits the size of the rollback journal. \
+                Reduce this value on memory-constrained systems."
+    )]
+    pub journal_size_limit: u64,
 }
 
 impl Default for SqlOptions {
@@ -627,9 +777,169 @@ impl Default for SqlOptions {
             max_connections: DEFAULT_DATABASE_MAX_CONNECTIONS,
             soft_memory_limit: DEFAULT_DATABASE_SOFT_MEMORY_LIMIT,
             hard_memory_limit: DEFAULT_DATABASE_HARD_MEMORY_LIMIT,
+            shared_cache: false,
             hooks: vec![],
             migrations: None,
             aggregators: vec![],
+            temp_store: DEFAULT_DATABASE_TEMP_STORE.to_string(),
+            mmap_size: DEFAULT_DATABASE_MMAP_SIZE,
+            journal_size_limit: DEFAULT_DATABASE_JOURNAL_SIZE_LIMIT,
+        }
+    }
+}
+
+#[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
+#[serde(default)]
+#[command(next_help_heading = "Activity tracking options")]
+pub struct ActivityOptions {
+    /// Enable activity tracking for user sessions
+    /// NOTE: Requires --indexing.transactions to be enabled
+    #[arg(
+        long = "activity.enabled",
+        default_value_t = false,
+        help = "Whether to track user activity sessions. When enabled, aggregates transaction \
+                calls into sessions for efficient activity queries. Requires transaction indexing \
+                to be enabled (--indexing.transactions)."
+    )]
+    pub activity_enabled: bool,
+
+    /// Session timeout in seconds
+    #[arg(
+        long = "activity.session_timeout",
+        default_value_t = DEFAULT_ACTIVITY_SESSION_TIMEOUT,
+        help = "Duration in seconds of inactivity before starting a new session. Default is 3600 \
+                seconds (1 hour)."
+    )]
+    pub session_timeout: u64,
+
+    /// Days to retain activity records
+    // #[arg(
+    //     long = "activity.retention_days",
+    //     default_value_t = DEFAULT_ACTIVITY_RETENTION_DAYS,
+    //     help = "Number of days to keep activity records before cleanup. Set to 0 to keep forever. \
+    //             Default is 30 days."
+    // )]
+    // pub retention_days: u64,
+
+    /// Entrypoints to exclude from activity tracking
+    #[arg(
+        long = "activity.excluded_entrypoints",
+        value_delimiter = ',',
+        help = "Comma-separated list of entrypoints to exclude from activity tracking. Useful for \
+                filtering out wrapper functions or system calls. Defaults include: \
+                execute_from_outside_v3, request_random, submit_random, assert_consumed, \
+                deployContract, set_name, register_model, entities, init_contract, upgrade_model, \
+                emit_events, emit_event, set_metadata"
+    )]
+    pub excluded_entrypoints: Vec<String>,
+}
+
+impl Default for ActivityOptions {
+    fn default() -> Self {
+        Self {
+            activity_enabled: false,
+            session_timeout: DEFAULT_ACTIVITY_SESSION_TIMEOUT,
+            // retention_days: DEFAULT_ACTIVITY_RETENTION_DAYS,
+            excluded_entrypoints: vec![],
+        }
+    }
+}
+
+#[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
+#[serde(default)]
+#[command(next_help_heading = "Achievement tracking options")]
+pub struct AchievementOptions {
+    /// Model name for achievement registration (trophy creation)
+    #[arg(
+        long = "achievement.registration_model_name",
+        default_value = DEFAULT_ACHIEVEMENT_REGISTRATION_MODEL_NAME,
+        help = "The model tag to listen for achievement registration events. This model should \
+                contain achievement definitions with id, title, description, tasks, etc."
+    )]
+    pub registration_model_name: String,
+
+    /// Model name for achievement progression (trophy progression)
+    #[arg(
+        long = "achievement.progression_model_name",
+        default_value = DEFAULT_ACHIEVEMENT_PROGRESSION_MODEL_NAME,
+        help = "The model tag to listen for achievement progression events. This model should \
+                contain player_id, task_id, and count fields to track task completion."
+    )]
+    pub progression_model_name: String,
+}
+
+impl Default for AchievementOptions {
+    fn default() -> Self {
+        Self {
+            registration_model_name: DEFAULT_ACHIEVEMENT_REGISTRATION_MODEL_NAME.to_string(),
+            progression_model_name: DEFAULT_ACHIEVEMENT_PROGRESSION_MODEL_NAME.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, clap::Args, Clone, Serialize, Deserialize, PartialEq, MergeOptions)]
+#[serde(default)]
+#[command(next_help_heading = "Search API options (SQLite FTS5)")]
+pub struct SearchOptions {
+    /// Enable global search API with FTS5
+    #[arg(
+        long = "search.enabled",
+        default_value_t = false,
+        help = "Enable global search API using SQLite FTS5 full-text search. \
+                Automatically searches all FTS5-indexed tables (achievements, controllers, token_attributes)."
+    )]
+    pub search_enabled: bool,
+
+    /// Maximum number of search results to return per table
+    #[arg(
+        long = "search.max_results",
+        default_value_t = DEFAULT_SEARCH_MAX_RESULTS,
+        help = "Maximum number of search results to return per table. Default is 100."
+    )]
+    pub max_results: usize,
+
+    /// Minimum search query length
+    #[arg(
+        long = "search.min_query_length",
+        default_value_t = DEFAULT_SEARCH_MIN_QUERY_LENGTH,
+        help = "Minimum length of search query string. Queries shorter than this will be rejected. Default is 2."
+    )]
+    pub min_query_length: usize,
+
+    /// Return snippets with highlighted matches
+    #[arg(
+        long = "search.return_snippets",
+        default_value_t = true,
+        help = "Return text snippets with match highlights in search results using FTS5 snippet() function. Default is true."
+    )]
+    pub return_snippets: bool,
+
+    /// Snippet length for search result highlighting
+    #[arg(
+        long = "search.snippet_length",
+        default_value_t = DEFAULT_SEARCH_SNIPPET_LENGTH,
+        help = "Maximum length of text snippets in search results. Default is 64 characters."
+    )]
+    pub snippet_length: usize,
+
+    /// Enable prefix matching (e.g., 'dra*' matches 'dragon')
+    #[arg(
+        long = "search.prefix_matching",
+        default_value_t = true,
+        help = "Enable prefix matching in FTS5 queries. Allows wildcard searches like 'dra*'. Default is true."
+    )]
+    pub prefix_matching: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            search_enabled: false,
+            max_results: DEFAULT_SEARCH_MAX_RESULTS,
+            min_query_length: DEFAULT_SEARCH_MIN_QUERY_LENGTH,
+            return_snippets: true,
+            snippet_length: DEFAULT_SEARCH_SNIPPET_LENGTH,
+            prefix_matching: true,
         }
     }
 }
@@ -1011,11 +1321,25 @@ fn parse_aggregator_config(part: &str) -> anyhow::Result<AggregatorConfig> {
         }
     };
 
+    // Parse group_by - can be comma-separated for multiple fields
+    let group_by: Vec<String> = parts[2]
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if group_by.is_empty() {
+        return Err(anyhow::anyhow!("group_by cannot be empty"));
+    }
+
     Ok(AggregatorConfig {
         id: parts[0].to_string(),
         model_tag: parts[1].to_string(),
-        group_by: parts[2].to_string(),
+        group_by,
         aggregation,
         order,
     })
 }
+
+// Parses clap cli argument which is expected to be in the format:
+// - table_name:field1,field2,field3

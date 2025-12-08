@@ -11,8 +11,10 @@ mod tests {
     use tokio::sync::broadcast;
     use torii_messaging::{Messaging, MessagingConfig};
     use torii_sqlite::executor::Executor;
+    use torii_sqlite::utils::felt_to_sql_string;
     use torii_sqlite::Sql;
     use torii_storage::proto::{ContractDefinition, ContractType};
+    use torii_storage::utils::format_world_scoped_id;
 
     use crate::schema::build_schema;
     use crate::tests::{
@@ -51,11 +53,11 @@ mod tests {
             .clone()
     }
 
-    async fn entity_model_query(schema: &Schema, id: &Felt) -> Value {
+    async fn entity_model_query(schema: &Schema, world_address: &Felt, id: &Felt) -> Value {
         let query = format!(
             r#"
           {{
-            entity (id: "{:#x}") {{
+            entity (id: "{}") {{
               keys
               models {{
                 ... on types_test_Record {{
@@ -91,7 +93,7 @@ mod tests {
             }}
           }}
         "#,
-            id
+            format_world_scoped_id(world_address, id)
         );
 
         let result = run_graphql_query(schema, &query).await;
@@ -108,7 +110,7 @@ mod tests {
     async fn entities_test() -> Result<()> {
         let tempfile = NamedTempFile::new().unwrap();
         let path = tempfile.path().to_string_lossy();
-        let (pool, provider) = spinup_types_test(&path).await?;
+        let (pool, provider, world_address) = spinup_types_test(&path).await?;
 
         // Set up storage and messaging
         let (shutdown_tx, _) = broadcast::channel(1);
@@ -125,7 +127,7 @@ mod tests {
                 pool.clone(),
                 sender,
                 &[ContractDefinition {
-                    address: Felt::ZERO,
+                    address: world_address,
                     r#type: ContractType::WORLD,
                     starting_block: None,
                 }],
@@ -157,12 +159,20 @@ mod tests {
         assert_eq!(connection.total_count, 2);
         // due to parallelization order is nondeterministic
         assert!(
-            first_entity.node.keys.clone().unwrap() == vec!["0x0", "0x1"]
-                || first_entity.node.keys.clone().unwrap() == vec!["0x0"]
+            first_entity.node.keys.clone().unwrap()
+                == vec![
+                    felt_to_sql_string(&Felt::ZERO),
+                    felt_to_sql_string(&Felt::ONE)
+                ]
+                || first_entity.node.keys.clone().unwrap() == vec![felt_to_sql_string(&Felt::ZERO)]
         );
         assert!(
-            last_entity.node.keys.clone().unwrap() == vec!["0x0", "0x1"]
-                || last_entity.node.keys.clone().unwrap() == vec!["0x0"]
+            last_entity.node.keys.clone().unwrap()
+                == vec![
+                    felt_to_sql_string(&Felt::ZERO),
+                    felt_to_sql_string(&Felt::ONE)
+                ]
+                || last_entity.node.keys.clone().unwrap() == vec![felt_to_sql_string(&Felt::ZERO)]
         );
 
         // double key param - returns all entities with `0x0` as first key and `0x1` as second key
@@ -171,7 +181,13 @@ mod tests {
         let first_entity = connection.edges.first().unwrap();
         assert_eq!(connection.edges.len(), 1);
         assert_eq!(connection.total_count, 1);
-        assert_eq!(first_entity.node.keys.clone().unwrap(), vec!["0x0", "0x1"]);
+        assert_eq!(
+            first_entity.node.keys.clone().unwrap(),
+            vec![
+                felt_to_sql_string(&Felt::ZERO),
+                felt_to_sql_string(&Felt::ONE)
+            ]
+        );
 
         // pagination testing
         let entities = entities_query(&schema, "(first: 20)").await;
@@ -284,7 +300,7 @@ mod tests {
 
         // entity model union
         let id = poseidon_hash_many(&[Felt::ZERO]);
-        let entity = entity_model_query(&schema, &id).await;
+        let entity = entity_model_query(&schema, &world_address, &id).await;
         let models = entity.get("models").ok_or("no models found").unwrap();
 
         // models should contain record & recordsibling
@@ -297,7 +313,7 @@ mod tests {
         assert_eq!(record_sibling.record_id, 0);
 
         let id = poseidon_hash_many(&[Felt::ZERO, Felt::ONE]);
-        let entity = entity_model_query(&schema, &id).await;
+        let entity = entity_model_query(&schema, &world_address, &id).await;
         let models = entity.get("models").ok_or("no models found").unwrap();
         let subrecord: Subrecord = serde_json::from_value(models[0].clone()).unwrap();
         assert_eq!(&subrecord.__typename, "types_test_Subrecord");

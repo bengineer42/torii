@@ -50,7 +50,7 @@ use torii_indexer::{FetcherConfig, FetchingFlags, IndexingFlags};
 use torii_libp2p_relay::Relay;
 use torii_messaging::{Messaging, MessagingConfig};
 use torii_processors::{EventProcessorConfig, Processors};
-use torii_server::proxy::Proxy;
+use torii_server::proxy::{Proxy, ProxySettings};
 use torii_sqlite::executor::Executor;
 use torii_sqlite::{Sql, SqlConfig};
 use torii_storage::proto::{ContractDefinition, ContractType};
@@ -62,6 +62,7 @@ use url::form_urlencoded;
 mod constants;
 
 use crate::constants::LOG_TARGET;
+const MIN_THREADS: usize = 1;
 
 #[derive(Debug, Clone)]
 pub enum AllocationStrategy {
@@ -103,48 +104,57 @@ impl RuntimeAllocation {
         let (query_threads, indexer_threads) = match strategy {
             AllocationStrategy::QueryPriority => {
                 // 70% query, 30% indexer
-                let query = ((available_threads * 7) / 10).clamp(4, available_threads);
+                let query = ((available_threads * 7) / 10)
+                    .max(MIN_THREADS)
+                    .min(available_threads);
                 let indexer = available_threads
                     .saturating_sub(query)
-                    .clamp(2, available_threads);
+                    .max(MIN_THREADS)
+                    .min(available_threads);
                 (query, indexer)
             }
             AllocationStrategy::IndexerPriority => {
                 // 30% query, 70% indexer
-                let indexer = ((available_threads * 7) / 10).clamp(4, available_threads);
+                let indexer = ((available_threads * 7) / 10)
+                    .max(MIN_THREADS)
+                    .min(available_threads);
                 let query = available_threads
                     .saturating_sub(indexer)
-                    .clamp(2, available_threads);
+                    .max(MIN_THREADS)
+                    .min(available_threads);
                 (query, indexer)
             }
             AllocationStrategy::Balanced => {
                 // 50% each
                 let half = available_threads / 2;
                 (
-                    half.clamp(2, available_threads),
-                    half.clamp(2, available_threads),
+                    half.max(MIN_THREADS).min(available_threads),
+                    half.max(MIN_THREADS).min(available_threads),
                 )
             }
             AllocationStrategy::Adaptive => {
                 // Default: 60% query, 40% indexer (queries are user-facing)
-                let query = ((available_threads * 6) / 10).clamp(4, available_threads);
+                let query = ((available_threads * 6) / 10)
+                    .max(MIN_THREADS)
+                    .min(available_threads);
                 let indexer = available_threads
                     .saturating_sub(query)
-                    .clamp(2, available_threads);
+                    .max(MIN_THREADS)
+                    .min(available_threads);
                 (query, indexer)
             }
         };
 
         Self {
             query_threads: if query_override > 0 {
-                query_override.clamp(1, cpu_count)
+                query_override.max(MIN_THREADS).min(cpu_count)
             } else {
-                query_threads
+                query_threads.max(MIN_THREADS)
             },
             indexer_threads: if indexer_override > 0 {
-                indexer_override.clamp(1, cpu_count)
+                indexer_override.max(MIN_THREADS).min(cpu_count)
             } else {
-                indexer_threads
+                indexer_threads.max(MIN_THREADS)
             },
             main_threads: 1, // Keep main runtime lightweight
         }
@@ -190,6 +200,13 @@ fn create_query_runtime(threads: usize) -> ManagedRuntime {
 // Function to create a dedicated indexer runtime
 fn create_indexer_runtime(threads: usize) -> ManagedRuntime {
     ManagedRuntime::new(threads, "torii-indexer", 1024 * 1024) // 1MB stack (less than queries)
+}
+
+// Config sqlite memstatus
+fn config_sqlite_memstatus(enable: bool) {
+    unsafe {
+        libsqlite3_sys::sqlite3_config(libsqlite3_sys::SQLITE_CONFIG_MEMSTATUS, enable as i32)
+    };
 }
 
 /// Creates a responsive progress bar template based on terminal size
@@ -357,17 +374,17 @@ impl Runner {
             .create_if_missing(true)
             .with_regexp();
 
-        // Optimize SQLite threading for our runtime architecture
-        // Use total available threads instead of artificial 8-thread limit
-        let sqlite_threads = cmp::min(
-            cpu_count,
-            allocation.query_threads + allocation.indexer_threads,
-        );
+        // Optimize SQLite threading for parallelizable operations
+        // SQLite uses auxiliary threads for sorting, indexing, and complex queries
+        // Default is 0 (no parallelization), so we enable it for better performance
+        // Set to number of available CPUs for maximum parallelization potential
+        let sqlite_threads = cpu_count;
         options = options.pragma("threads", sqlite_threads.to_string());
 
         // Advanced performance settings optimized for indexing + query workload
         options = options.auto_vacuum(SqliteAutoVacuum::None);
         options = options.journal_mode(SqliteJournalMode::Wal);
+        options = options.shared_cache(self.args.sql.shared_cache);
 
         // Use NORMAL for better performance during heavy indexing
         // FULL would be safer but much slower for writes
@@ -386,8 +403,6 @@ impl Runner {
 
         // Increase busy timeout for concurrent access
         options = options.pragma("busy_timeout", self.args.sql.busy_timeout.to_string());
-
-        // Memory limits
         options = options.pragma(
             "soft_heap_limit",
             self.args.sql.soft_memory_limit.to_string(),
@@ -397,11 +412,19 @@ impl Runner {
             self.args.sql.hard_memory_limit.to_string(),
         );
 
-        // Additional performance optimizations for indexing workload
-        options = options.pragma("temp_store", "memory"); // Store temp tables in memory
-        options = options.pragma("mmap_size", "268435456"); // 256MB memory mapping
-        options = options.pragma("journal_size_limit", "67108864"); // 64MB journal limit
+        // Enable memory status tracking globally
+        config_sqlite_memstatus(true);
 
+        // Additional performance optimizations for indexing workload
+        let temp_store = self.args.sql.temp_store.clone();
+        options = options.pragma("temp_store", temp_store);
+        options = options.pragma("mmap_size", self.args.sql.mmap_size.to_string());
+        options = options.pragma(
+            "journal_size_limit",
+            self.args.sql.journal_size_limit.to_string(),
+        );
+
+        // Write pool: NO memory limits - critical for indexing performance
         let write_pool = SqlitePoolOptions::new()
             .min_connections(1)
             .max_connections(1)
@@ -415,6 +438,7 @@ impl Runner {
             .execute("PRAGMA wal_checkpoint(TRUNCATE);")
             .await?;
 
+        // Readonly pool
         let readonly_options = options.read_only(true);
 
         // Use more connections for readonly pool to handle concurrent queries
@@ -475,6 +499,16 @@ impl Runner {
             );
         }
 
+        // Validate activity tracking configuration
+        if self.args.activity.activity_enabled && !self.args.indexing.transactions {
+            return Err(anyhow::anyhow!(
+                "Activity tracking is enabled but transaction indexing is disabled. \
+                 Activity tracking requires transaction data to function. \
+                 Please enable transaction indexing with --indexing.transactions or \
+                 disable activity tracking with --activity.enabled=false"
+            ));
+        }
+
         let historical_models = self.args.sql.historical.clone().into_iter().try_fold(
             HashSet::new(),
             |mut acc, tag| {
@@ -485,6 +519,35 @@ impl Runner {
             },
         )?;
 
+        // Build excluded entrypoints set - use defaults if not specified
+        let default_excluded = [
+            "execute_from_outside_v3",
+            "request_random",
+            "submit_random",
+            "assert_consumed",
+            "deployContract",
+            "set_name",
+            "register_model",
+            "entities",
+            "init_contract",
+            "upgrade_model",
+            "emit_events",
+            "emit_event",
+            "set_metadata",
+        ];
+
+        let activity_excluded_entrypoints: HashSet<String> =
+            if self.args.activity.excluded_entrypoints.is_empty() {
+                default_excluded.iter().map(|s| s.to_string()).collect()
+            } else {
+                self.args
+                    .activity
+                    .excluded_entrypoints
+                    .iter()
+                    .cloned()
+                    .collect()
+            };
+
         let sql_config = SqlConfig {
             all_model_indices: self.args.sql.all_model_indices,
             model_indices: self.args.sql.model_indices.clone(),
@@ -493,6 +556,18 @@ impl Runner {
             aggregators: self.args.sql.aggregators.clone(),
             wal_truncate_size_threshold: self.args.sql.wal_truncate_size_threshold,
             optimize_interval: self.args.sql.optimize_interval,
+            activity_enabled: self.args.activity.activity_enabled,
+            activity_session_timeout: self.args.activity.session_timeout,
+            activity_excluded_entrypoints,
+            token_attributes: self.args.erc.token_attributes,
+            trait_counts: self.args.erc.trait_counts,
+            achievement_registration_model_name: self.args.achievement.registration_model_name,
+            achievement_progression_model_name: self.args.achievement.progression_model_name,
+            search_max_results: self.args.search.max_results,
+            search_min_query_length: self.args.search.min_query_length,
+            search_prefix_matching: self.args.search.prefix_matching,
+            search_return_snippets: self.args.search.return_snippets,
+            search_snippet_length: self.args.search.snippet_length,
         };
 
         let (mut executor, sender) = Executor::new_with_config(
@@ -586,6 +661,21 @@ impl Runner {
                         .clone()
                         .into_iter()
                         .collect(),
+                    metadata_updates: self.args.erc.metadata_updates,
+                    metadata_update_whitelist: self
+                        .args
+                        .erc
+                        .metadata_update_whitelist
+                        .iter()
+                        .filter_map(|s| Felt::from_hex(s.trim()).ok())
+                        .collect(),
+                    metadata_update_blacklist: self
+                        .args
+                        .erc
+                        .metadata_update_blacklist
+                        .iter()
+                        .filter_map(|s| Felt::from_hex(s.trim()).ok())
+                        .collect(),
                 },
                 world_block: self.args.indexing.world_block,
             },
@@ -632,8 +722,8 @@ impl Runner {
             shutdown_rx,
             storage.clone(),
             messaging.clone(),
-            self.args.world_address.unwrap_or_default(),
             cross_messaging_tx,
+            readonly_pool.clone(),
             GrpcConfig {
                 subscription_buffer_size: self.args.grpc.subscription_buffer_size,
                 optimistic: self.args.grpc.optimistic,
@@ -665,6 +755,11 @@ impl Runner {
             storage.clone(),
             provider.clone(),
             self.version_spec.clone(),
+            ProxySettings {
+                tcp_keepalive_interval: self.args.grpc.tcp_keepalive_interval,
+                http2_keepalive_interval: self.args.grpc.http2_keepalive_interval,
+                http2_keepalive_timeout: self.args.grpc.http2_keepalive_timeout,
+            },
         );
 
         // Handle mkcert certificate generation

@@ -3,7 +3,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
-use dojo_types::naming;
 use starknet::core::types::contract::AbiEntry;
 use starknet::core::types::{
     BlockId, BlockTag, ContractClass, EntryPointsByType, LegacyContractAbiEntry, StarknetError,
@@ -13,52 +12,58 @@ use starknet::core::utils::get_selector_from_name;
 use starknet::providers::{Provider, ProviderError};
 use tokio::sync::{Mutex, RwLock};
 use torii_math::I256;
-use torii_proto::Model;
+use torii_proto::{BalanceId, Model, TokenId};
 use torii_storage::ReadOnlyStorage;
 
 use crate::error::Error;
 
 pub mod error;
 
-pub type CacheError = Box<dyn std::error::Error + Send + Sync>;
+pub type CacheError = Error;
 
 #[async_trait]
 pub trait ReadOnlyCache: Send + Sync + std::fmt::Debug {
-    /// Get models by selectors. If selectors is empty, returns all models.
-    async fn models(&self, selectors: &[Felt]) -> Result<Vec<Model>, CacheError>;
+    /// Get models by selectors from specified worlds.
+    /// If world_addresses is empty, returns models from all worlds.
+    /// If selectors is empty, returns all models from the specified worlds.
+    async fn models(
+        &self,
+        world_addresses: &[Felt],
+        selectors: &[Felt],
+    ) -> Result<Vec<Model>, CacheError>;
 
-    /// Get a specific model by selector.
-    async fn model(&self, selector: Felt) -> Result<Model, CacheError>;
+    /// Get a specific model by selector for the given world.
+    async fn model(&self, world_address: Felt, selector: Felt) -> Result<Model, CacheError>;
 
     /// Check if a token is registered.
-    async fn is_token_registered(&self, token_id: &str) -> bool;
+    async fn is_token_registered(&self, token_id: &TokenId) -> bool;
 
     /// Get a token registration lock for coordination.
-    async fn get_token_registration_lock(&self, token_id: &str) -> Option<Arc<Mutex<()>>>;
+    async fn get_token_registration_lock(&self, token_id: TokenId) -> Option<Arc<Mutex<()>>>;
 
     /// Get the balances diff.
-    async fn balances_diff(&self) -> HashMap<String, I256>;
+    async fn balances_diff(&self) -> HashMap<BalanceId, I256>;
 
     /// Get the total supply diff.
-    async fn total_supply_diff(&self) -> HashMap<String, I256>;
+    async fn total_supply_diff(&self) -> HashMap<TokenId, I256>;
 }
 
 #[async_trait]
 pub trait Cache: ReadOnlyCache + Send + Sync + std::fmt::Debug {
-    /// Register a model in the cache.
-    async fn register_model(&self, selector: Felt, model: Model);
+    /// Register a model in the cache, scoped to a world.
+    async fn register_model(&self, world_address: Felt, selector: Felt, model: Model);
 
     /// Clear all models from the cache.
     async fn clear_models(&self);
 
     /// Mark a token as registered.
-    async fn mark_token_registered(&self, token_id: &str);
+    async fn mark_token_registered(&self, token_id: TokenId);
 
     /// Clear the balances diff.
     async fn clear_balances_diff(&self);
 
     /// Update the balances diff.
-    async fn update_balance_diff(&self, token_id: &str, from: Felt, to: Felt, value: U256);
+    async fn update_balance_diff(&self, token_id: TokenId, from: Felt, to: Felt, value: U256);
 }
 
 #[derive(Debug)]
@@ -78,29 +83,27 @@ impl InMemoryCache {
 
 #[async_trait]
 impl ReadOnlyCache for InMemoryCache {
-    async fn models(&self, selectors: &[Felt]) -> Result<Vec<Model>, CacheError> {
-        self.model_cache
-            .models(selectors)
-            .await
-            .map_err(|e| Box::new(e) as CacheError)
+    async fn models(
+        &self,
+        world_addresses: &[Felt],
+        selectors: &[Felt],
+    ) -> Result<Vec<Model>, CacheError> {
+        self.model_cache.models(world_addresses, selectors).await
     }
 
-    async fn model(&self, selector: Felt) -> Result<Model, CacheError> {
-        self.model_cache
-            .model(selector)
-            .await
-            .map_err(|e| Box::new(e) as CacheError)
+    async fn model(&self, world_address: Felt, selector: Felt) -> Result<Model, CacheError> {
+        self.model_cache.model(world_address, selector).await
     }
 
-    async fn is_token_registered(&self, token_id: &str) -> bool {
+    async fn is_token_registered(&self, token_id: &TokenId) -> bool {
         self.erc_cache.is_token_registered(token_id).await
     }
 
-    async fn get_token_registration_lock(&self, token_id: &str) -> Option<Arc<Mutex<()>>> {
+    async fn get_token_registration_lock(&self, token_id: TokenId) -> Option<Arc<Mutex<()>>> {
         self.erc_cache.get_token_registration_lock(token_id).await
     }
 
-    async fn balances_diff(&self) -> HashMap<String, I256> {
+    async fn balances_diff(&self) -> HashMap<BalanceId, I256> {
         self.erc_cache
             .balances_diff
             .iter()
@@ -108,7 +111,7 @@ impl ReadOnlyCache for InMemoryCache {
             .collect()
     }
 
-    async fn total_supply_diff(&self) -> HashMap<String, I256> {
+    async fn total_supply_diff(&self) -> HashMap<TokenId, I256> {
         self.erc_cache
             .total_supply_diff
             .iter()
@@ -119,15 +122,15 @@ impl ReadOnlyCache for InMemoryCache {
 
 #[async_trait]
 impl Cache for InMemoryCache {
-    async fn register_model(&self, selector: Felt, model: Model) {
-        self.model_cache.set(selector, model).await
+    async fn register_model(&self, world_address: Felt, selector: Felt, model: Model) {
+        self.model_cache.set(world_address, selector, model).await
     }
 
     async fn clear_models(&self) {
         self.model_cache.clear().await
     }
 
-    async fn mark_token_registered(&self, token_id: &str) {
+    async fn mark_token_registered(&self, token_id: TokenId) {
         self.erc_cache.mark_token_registered(token_id).await
     }
 
@@ -138,94 +141,29 @@ impl Cache for InMemoryCache {
         self.erc_cache.total_supply_diff.shrink_to_fit();
     }
 
-    async fn update_balance_diff(&self, token_id: &str, from: Felt, to: Felt, value: U256) {
-        let value_i256 = I256::from(value);
-        let negative_value_i256 = I256 {
-            value,
-            is_negative: true,
-        };
-
-        // Track individual balance changes
-        if from != Felt::ZERO {
-            // from/token_id
-            let from_balance_id = format!("{:#x}/{}", from, token_id);
-            // Use atomic operation to avoid deadlocks
-            self.erc_cache
-                .balances_diff
-                .entry(from_balance_id)
-                .and_modify(|balance| *balance -= value_i256)
-                .or_insert(negative_value_i256);
-        }
-
-        if to != Felt::ZERO {
-            // to/token_id
-            let to_balance_id = format!("{:#x}/{}", to, token_id);
-            // Use atomic operation to avoid deadlocks
-            self.erc_cache
-                .balances_diff
-                .entry(to_balance_id)
-                .and_modify(|balance| *balance += value_i256)
-                .or_insert(value_i256);
-        }
-
-        // Track total supply changes based on token type
-        // Schema:
-        // - ERC-20: total_supply at contract level (sum of all tokens)
-        // - ERC-721/ERC-1155: total_supply per token ID only (contract-level handled in registration)
-
-        if token_id.contains(':') {
-            // This is an NFT token (ERC721/ERC1155)
-            // Format: "contract_address:token_id"
-            // Only track individual token supply, contract-level is handled in registration
-            if from == Felt::ZERO && to != Felt::ZERO {
-                // Minting - track supply per token_id
-                self.erc_cache
-                    .total_supply_diff
-                    .entry(token_id.to_string())
-                    .and_modify(|supply| *supply += value_i256)
-                    .or_insert(value_i256);
-            } else if from != Felt::ZERO && to == Felt::ZERO {
-                // Burning - track supply per token_id
-                self.erc_cache
-                    .total_supply_diff
-                    .entry(token_id.to_string())
-                    .and_modify(|supply| *supply -= value_i256)
-                    .or_insert(negative_value_i256);
-            }
-        } else {
-            // This is an ERC20 token, track supply changes at contract level
-            if from == Felt::ZERO && to != Felt::ZERO {
-                // Minting - increase total supply by amount
-                self.erc_cache
-                    .total_supply_diff
-                    .entry(token_id.to_string())
-                    .and_modify(|supply| *supply += value_i256)
-                    .or_insert(value_i256);
-            } else if from != Felt::ZERO && to == Felt::ZERO {
-                // Burning - decrease total supply by amount
-                self.erc_cache
-                    .total_supply_diff
-                    .entry(token_id.to_string())
-                    .and_modify(|supply| *supply -= value_i256)
-                    .or_insert(negative_value_i256);
-            }
-        }
+    async fn update_balance_diff(&self, token_id: TokenId, from: Felt, to: Felt, value: U256) {
+        self.erc_cache
+            .update_balance_diff(token_id, from, to, value)
+            .await
     }
 }
 
 #[derive(Debug)]
 pub struct ModelCache {
-    model_cache: RwLock<HashMap<Felt, Model>>,
+    // Outer key: world_address, Inner key: model_selector
+    model_cache: RwLock<HashMap<Felt, HashMap<Felt, Model>>>,
 }
 
 impl ModelCache {
     pub async fn new(storage: Arc<dyn ReadOnlyStorage>) -> Result<Self, Error> {
-        let models = storage.models(&[]).await?;
+        let models = storage.models(&[], &[]).await?;
 
-        let mut model_cache = HashMap::new();
+        let mut model_cache: HashMap<Felt, HashMap<Felt, Model>> = HashMap::new();
         for model in models {
-            let selector = naming::compute_selector_from_names(&model.namespace, &model.name);
-            model_cache.insert(selector, model);
+            model_cache
+                .entry(model.world_address)
+                .or_default()
+                .insert(model.selector, model);
         }
 
         Ok(Self {
@@ -233,30 +171,65 @@ impl ModelCache {
         })
     }
 
-    pub async fn models(&self, selectors: &[Felt]) -> Result<Vec<Model>, Error> {
-        if selectors.is_empty() {
-            return Ok(self.model_cache.read().await.values().cloned().collect());
+    pub async fn models(
+        &self,
+        world_addresses: &[Felt],
+        selectors: &[Felt],
+    ) -> Result<Vec<Model>, Error> {
+        let cache = self.model_cache.read().await;
+        let mut result = Vec::new();
+
+        if world_addresses.is_empty() {
+            // Return from all worlds
+            for world_models in cache.values() {
+                if selectors.is_empty() {
+                    result.extend(world_models.values().cloned());
+                } else {
+                    for selector in selectors {
+                        if let Some(model) = world_models.get(selector) {
+                            result.push(model.clone());
+                        }
+                    }
+                }
+            }
+        } else {
+            // Return from specific worlds
+            for world in world_addresses {
+                let Some(world_models) = cache.get(world) else {
+                    continue;
+                };
+
+                if selectors.is_empty() {
+                    result.extend(world_models.values().cloned());
+                } else {
+                    for selector in selectors {
+                        if let Some(model) = world_models.get(selector) {
+                            result.push(model.clone());
+                        }
+                    }
+                }
+            }
         }
 
-        let mut schemas = Vec::with_capacity(selectors.len());
-        for selector in selectors {
-            schemas.push(self.model(*selector).await?);
-        }
-
-        Ok(schemas)
+        Ok(result)
     }
 
-    pub async fn model(&self, selector: Felt) -> Result<Model, Error> {
+    pub async fn model(&self, world_address: Felt, selector: Felt) -> Result<Model, Error> {
         let cache = self.model_cache.read().await;
+
         cache
-            .get(&selector)
+            .get(&world_address)
+            .and_then(|world_models| world_models.get(&selector))
             .cloned()
             .ok_or_else(|| Error::ModelNotFound(selector))
     }
 
-    pub async fn set(&self, selector: Felt, model: Model) {
+    pub async fn set(&self, world_address: Felt, selector: Felt, model: Model) {
         let mut cache = self.model_cache.write().await;
-        cache.insert(selector, model);
+        cache
+            .entry(world_address)
+            .or_insert_with(HashMap::new)
+            .insert(selector, model);
     }
 
     pub async fn clear(&self) {
@@ -273,31 +246,31 @@ pub enum TokenState {
 
 #[derive(Debug)]
 pub struct ErcCache {
-    pub balances_diff: DashMap<String, I256>,
+    pub balances_diff: DashMap<BalanceId, I256>,
     // Track total supply changes for ERC20 tokens (contract_address -> supply_diff)
-    pub total_supply_diff: DashMap<String, I256>,
+    pub total_supply_diff: DashMap<TokenId, I256>,
     // the registry is a map of token_id to a mutex that is used to track if the token is registered
     // we need a mutex for the token state to prevent race conditions in case of multiple token regs
-    pub token_id_registry: DashMap<String, TokenState>,
+    pub token_id_registry: DashMap<TokenId, TokenState>,
 }
 
 impl ErcCache {
     pub async fn new(storage: Arc<dyn ReadOnlyStorage>) -> Result<Self, Error> {
         // read existing token_id's from balances table and cache them
-        let token_id_registry: HashSet<String> = storage.token_ids().await?;
+        let token_id_registry: HashSet<TokenId> = storage.token_ids().await?;
 
         Ok(Self {
             balances_diff: DashMap::new(),
             total_supply_diff: DashMap::new(),
             token_id_registry: token_id_registry
-                .iter()
-                .map(|token_id| (token_id.clone(), TokenState::Registered))
+                .into_iter()
+                .map(|token_id| (token_id, TokenState::Registered))
                 .collect(),
         })
     }
 
-    pub async fn get_token_registration_lock(&self, token_id: &str) -> Option<Arc<Mutex<()>>> {
-        let entry = self.token_id_registry.entry(token_id.to_string());
+    pub async fn get_token_registration_lock(&self, token_id: TokenId) -> Option<Arc<Mutex<()>>> {
+        let entry = self.token_id_registry.entry(token_id);
         match entry {
             dashmap::Entry::Occupied(mut occupied) => match occupied.get() {
                 TokenState::Registering(mutex) => Some(mutex.clone()),
@@ -316,16 +289,87 @@ impl ErcCache {
         }
     }
 
-    pub async fn mark_token_registered(&self, token_id: &str) {
+    pub async fn mark_token_registered(&self, token_id: TokenId) {
         self.token_id_registry
-            .insert(token_id.to_string(), TokenState::Registered);
+            .insert(token_id, TokenState::Registered);
     }
 
-    pub async fn is_token_registered(&self, token_id: &str) -> bool {
+    pub async fn is_token_registered(&self, token_id: &TokenId) -> bool {
         self.token_id_registry
             .get(token_id)
             .map(|t| matches!(t.value(), TokenState::Registered))
             .unwrap_or(false)
+    }
+
+    pub async fn update_balance_diff(&self, token_id: TokenId, from: Felt, to: Felt, value: U256) {
+        let value_i256 = I256::from(value);
+        let negative_value_i256 = I256 {
+            value,
+            is_negative: true,
+        };
+
+        // Track individual balance changes
+        if from != Felt::ZERO {
+            let from_balance_id = BalanceId {
+                account_address: from,
+                token_id: token_id.clone(),
+            };
+            // Use atomic operation to avoid deadlocks
+            self.balances_diff
+                .entry(from_balance_id)
+                .and_modify(|balance| *balance -= value_i256)
+                .or_insert(negative_value_i256);
+        }
+
+        if to != Felt::ZERO {
+            let to_balance_id = BalanceId {
+                account_address: to,
+                token_id: token_id.clone(),
+            };
+            // Use atomic operation to avoid deadlocks
+            self.balances_diff
+                .entry(to_balance_id)
+                .and_modify(|balance| *balance += value_i256)
+                .or_insert(value_i256);
+        }
+
+        // Track total supply changes based on token type
+        // Schema:
+        // - ERC-20: total_supply at contract level (sum of all tokens)
+        // - ERC-721/ERC-1155: total_supply per token ID only (contract-level handled in registration)
+
+        if token_id.is_nft() {
+            // This is an NFT token (ERC721/ERC1155)
+            // Only track individual token supply, contract-level is handled in registration
+            if from == Felt::ZERO && to != Felt::ZERO {
+                // Minting - track supply per token_id
+                self.total_supply_diff
+                    .entry(token_id.clone())
+                    .and_modify(|supply| *supply += value_i256)
+                    .or_insert(value_i256);
+            } else if from != Felt::ZERO && to == Felt::ZERO {
+                // Burning - track supply per token_id
+                self.total_supply_diff
+                    .entry(token_id.clone())
+                    .and_modify(|supply| *supply -= value_i256)
+                    .or_insert(negative_value_i256);
+            }
+        } else {
+            // This is an ERC20 token, track supply changes at contract level
+            if from == Felt::ZERO && to != Felt::ZERO {
+                // Minting - increase total supply by amount
+                self.total_supply_diff
+                    .entry(token_id.clone())
+                    .and_modify(|supply| *supply += value_i256)
+                    .or_insert(value_i256);
+            } else if from != Felt::ZERO && to == Felt::ZERO {
+                // Burning - decrease total supply by amount
+                self.total_supply_diff
+                    .entry(token_id.clone())
+                    .and_modify(|supply| *supply -= value_i256)
+                    .or_insert(negative_value_i256);
+            }
+        }
     }
 }
 

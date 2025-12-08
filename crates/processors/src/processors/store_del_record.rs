@@ -3,6 +3,7 @@ use dojo_world::contracts::abigen::world::Event as WorldEvent;
 use starknet::core::types::Event;
 use starknet::providers::Provider;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use torii_cache::CacheError;
 use tracing::{debug, info};
 
 use crate::error::Error;
@@ -29,6 +30,7 @@ where
 
     fn task_identifier(&self, event: &Event) -> TaskId {
         let mut hasher = DefaultHasher::new();
+        event.from_address.hash(&mut hasher);
         event.keys[1].hash(&mut hasher);
         event.keys[2].hash(&mut hasher);
         hasher.finish()
@@ -36,6 +38,7 @@ where
 
     fn task_dependencies(&self, event: &Event) -> Vec<TaskId> {
         let mut hasher = DefaultHasher::new();
+        event.from_address.hash(&mut hasher);
         event.keys[1].hash(&mut hasher); // Use the model selector to create a unique ID
         vec![hasher.finish()] // Return the dependency on the register_model task
     }
@@ -69,13 +72,13 @@ where
 
         // If the model does not exist, silently ignore it.
         // This can happen if only specific namespaces are indexed.
-        let model = match ctx.cache.model(event.selector).await {
+        let model = match ctx.cache.model(ctx.contract_address, event.selector).await {
             Ok(m) => m,
-            Err(e) if e.to_string().contains("no rows") && !ctx.config.namespaces.is_empty() => {
+            Err(CacheError::ModelNotFound(_)) if !ctx.config.namespaces.is_empty() => {
                 debug!(
                     target: LOG_TARGET,
                     selector = %event.selector,
-                    "Model does not exist, skipping."
+                    "Model not found in cache, skipping. This can happen if only specific namespaces are indexed."
                 );
                 return Ok(());
             }
@@ -94,6 +97,7 @@ where
 
         ctx.storage
             .delete_entity(
+                ctx.contract_address,
                 event.entity_id,
                 event.selector,
                 entity,

@@ -18,27 +18,34 @@ use tonic::transport::Endpoint;
 
 use torii_proto::error::ProtoError;
 use torii_proto::proto::world::{
-    world_client, PublishMessageBatchRequest, PublishMessageRequest, RetrieveContractsRequest,
+    world_client, PublishMessageBatchRequest, PublishMessageRequest, RetrieveAchievementsRequest,
+    RetrieveAchievementsResponse, RetrieveActivitiesRequest, RetrieveActivitiesResponse,
+    RetrieveAggregationsRequest, RetrieveAggregationsResponse, RetrieveContractsRequest,
     RetrieveContractsResponse, RetrieveControllersRequest, RetrieveControllersResponse,
-    RetrieveEntitiesRequest, RetrieveEntitiesResponse, RetrieveEventMessagesRequest,
-    RetrieveEventsRequest, RetrieveEventsResponse, RetrieveTokenBalancesRequest,
-    RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest, RetrieveTokenContractsResponse,
-    RetrieveTokenTransfersRequest, RetrieveTokenTransfersResponse, RetrieveTokensRequest,
-    RetrieveTokensResponse, RetrieveTransactionsRequest, RetrieveTransactionsResponse,
+    RetrieveEntitiesRequest, RetrieveEntitiesResponse, RetrieveEventsRequest,
+    RetrieveEventsResponse, RetrievePlayerAchievementsRequest, RetrievePlayerAchievementsResponse,
+    RetrieveTokenBalancesRequest, RetrieveTokenBalancesResponse, RetrieveTokenContractsRequest,
+    RetrieveTokenContractsResponse, RetrieveTokenTransfersRequest, RetrieveTokenTransfersResponse,
+    RetrieveTokensRequest, RetrieveTokensResponse, RetrieveTransactionsRequest,
+    RetrieveTransactionsResponse, SearchRequest, SubscribeAchievementProgressionsRequest,
+    SubscribeAchievementProgressionsResponse, SubscribeActivitiesRequest,
+    SubscribeActivitiesResponse, SubscribeAggregationsRequest, SubscribeAggregationsResponse,
     SubscribeContractsRequest, SubscribeContractsResponse, SubscribeEntitiesRequest,
-    SubscribeEntityResponse, SubscribeEventMessagesRequest, SubscribeEventsRequest,
-    SubscribeEventsResponse, SubscribeTokenBalancesRequest, SubscribeTokenBalancesResponse,
-    SubscribeTokenTransfersRequest, SubscribeTokenTransfersResponse, SubscribeTokensRequest,
-    SubscribeTokensResponse, SubscribeTransactionsRequest, SubscribeTransactionsResponse,
-    UpdateEntitiesSubscriptionRequest, UpdateEventMessagesSubscriptionRequest,
+    SubscribeEntityResponse, SubscribeEventsRequest, SubscribeEventsResponse,
+    SubscribeTokenBalancesRequest, SubscribeTokenBalancesResponse, SubscribeTokenTransfersRequest,
+    SubscribeTokenTransfersResponse, SubscribeTokensRequest, SubscribeTokensResponse,
+    SubscribeTransactionsRequest, SubscribeTransactionsResponse,
+    UpdateAchievementProgressionsSubscriptionRequest, UpdateActivitiesSubscriptionRequest,
+    UpdateAggregationsSubscriptionRequest, UpdateEntitiesSubscriptionRequest,
     UpdateTokenBalancesSubscriptionRequest, UpdateTokenSubscriptionRequest,
-    UpdateTokenTransfersSubscriptionRequest, WorldMetadataRequest,
+    UpdateTokenTransfersSubscriptionRequest, WorldsRequest,
 };
 use torii_proto::schema::Entity;
 use torii_proto::{
-    Clause, Contract, ContractQuery, ControllerQuery, Event, EventQuery, KeysClause, Message,
-    Query, Token, TokenBalance, TokenBalanceQuery, TokenContractQuery, TokenQuery, TokenTransfer,
-    TokenTransferQuery, Transaction, TransactionFilter, TransactionQuery,
+    AchievementQuery, ActivityQuery, AggregationQuery, Clause, Contract, ContractQuery,
+    ControllerQuery, Event, EventQuery, KeysClause, Message, PlayerAchievementQuery, Query,
+    SearchQuery, SqlRow, Token, TokenBalance, TokenBalanceQuery, TokenContractQuery, TokenQuery,
+    TokenTransfer, TokenTransferQuery, Transaction, TransactionFilter, TransactionQuery,
 };
 
 pub use torii_proto as types;
@@ -67,7 +74,6 @@ const DEFAULT_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone)]
 /// A lightweight wrapper around the grpc client.
 pub struct WorldClient {
-    _world_address: Felt,
     #[cfg(not(target_arch = "wasm32"))]
     inner: world_client::WorldClient<tonic::transport::Channel>,
     #[cfg(target_arch = "wasm32")]
@@ -76,16 +82,12 @@ pub struct WorldClient {
 
 impl WorldClient {
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn new(dst: String, world_address: Felt) -> Result<Self, Error> {
-        Self::new_with_config(dst, world_address, DEFAULT_MAX_MESSAGE_SIZE).await
+    pub async fn new(dst: String) -> Result<Self, Error> {
+        Self::new_with_config(dst, DEFAULT_MAX_MESSAGE_SIZE).await
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn new_with_config(
-        dst: String,
-        world_address: Felt,
-        max_message_size: usize,
-    ) -> Result<Self, Error> {
+    pub async fn new_with_config(dst: String, max_message_size: usize) -> Result<Self, Error> {
         const KEEPALIVE_TIME: u64 = 60;
 
         let endpoint = Endpoint::from_shared(dst.clone())
@@ -93,7 +95,6 @@ impl WorldClient {
             .tcp_keepalive(Some(Duration::from_secs(KEEPALIVE_TIME)));
         let channel = endpoint.connect().await.map_err(Error::Transport)?;
         Ok(Self {
-            _world_address: world_address,
             inner: world_client::WorldClient::with_origin(channel, endpoint.uri().clone())
                 .accept_compressed(CompressionEncoding::Gzip)
                 .send_compressed(CompressionEncoding::Gzip)
@@ -104,18 +105,13 @@ impl WorldClient {
 
     // we make this function async so that we can keep the function signature similar
     #[cfg(target_arch = "wasm32")]
-    pub async fn new(endpoint: String, world_address: Felt) -> Result<Self, Error> {
-        Self::new_with_config(endpoint, world_address, DEFAULT_MAX_MESSAGE_SIZE).await
+    pub async fn new(endpoint: String) -> Result<Self, Error> {
+        Self::new_with_config(endpoint, DEFAULT_MAX_MESSAGE_SIZE).await
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub async fn new_with_config(
-        endpoint: String,
-        world_address: Felt,
-        max_message_size: usize,
-    ) -> Result<Self, Error> {
+    pub async fn new_with_config(endpoint: String, max_message_size: usize) -> Result<Self, Error> {
         Ok(Self {
-            _world_address: world_address,
             inner: world_client::WorldClient::new(tonic_web_wasm_client::Client::new(endpoint))
                 .accept_compressed(CompressionEncoding::Gzip)
                 .send_compressed(CompressionEncoding::Gzip)
@@ -125,19 +121,26 @@ impl WorldClient {
     }
 
     /// Retrieve the metadata of the World.
-    pub async fn metadata(&mut self) -> Result<torii_proto::World, Error> {
+    pub async fn worlds(
+        &mut self,
+        world_addresses: Vec<Felt>,
+    ) -> Result<Vec<torii_proto::World>, Error> {
         self.inner
-            .world_metadata(WorldMetadataRequest {})
+            .worlds(WorldsRequest {
+                world_addresses: world_addresses
+                    .into_iter()
+                    .map(|a| a.to_bytes_be().to_vec())
+                    .collect(),
+            })
             .await
             .map_err(Error::Grpc)
-            .and_then(|res| {
+            .map(|res| {
                 res.into_inner()
-                    .world
-                    .ok_or(Error::Proto(ProtoError::MissingExpectedData(
-                        "world".to_string(),
-                    )))
-            })
-            .and_then(|world| world.try_into().map_err(Error::Proto))
+                    .worlds
+                    .into_iter()
+                    .map(|w| w.try_into().map_err(Error::Proto))
+                    .collect::<Result<Vec<torii_proto::World>, Error>>()
+            })?
     }
 
     pub async fn retrieve_controllers(
@@ -177,6 +180,228 @@ impl WorldClient {
             .await
             .map_err(Error::Grpc)
             .map(|res| res.into_inner())
+    }
+
+    pub async fn retrieve_aggregations(
+        &mut self,
+        query: AggregationQuery,
+    ) -> Result<RetrieveAggregationsResponse, Error> {
+        self.inner
+            .retrieve_aggregations(RetrieveAggregationsRequest {
+                query: Some(query.into()),
+            })
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())
+    }
+
+    pub async fn retrieve_activities(
+        &mut self,
+        query: ActivityQuery,
+    ) -> Result<RetrieveActivitiesResponse, Error> {
+        self.inner
+            .retrieve_activities(RetrieveActivitiesRequest {
+                query: Some(query.into()),
+            })
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())
+    }
+
+    pub async fn subscribe_activities(
+        &mut self,
+        world_addresses: Vec<Felt>,
+        namespaces: Vec<String>,
+        caller_addresses: Vec<Felt>,
+    ) -> Result<ActivityUpdateStreaming, Error> {
+        let request = SubscribeActivitiesRequest {
+            world_addresses: world_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            namespaces,
+            caller_addresses: caller_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+        };
+        let stream = self
+            .inner
+            .subscribe_activities(request)
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())?;
+        Ok(ActivityUpdateStreaming(stream.map_ok(Box::new(|res| {
+            (
+                res.subscription_id,
+                res.activity
+                    .map_or_else(torii_proto::Activity::default, |a| {
+                        a.try_into().expect("must able to serialize")
+                    }),
+            )
+        }))))
+    }
+
+    pub async fn update_activities_subscription(
+        &mut self,
+        subscription_id: u64,
+        world_addresses: Vec<Felt>,
+        namespaces: Vec<String>,
+        caller_addresses: Vec<Felt>,
+    ) -> Result<(), Error> {
+        let request = UpdateActivitiesSubscriptionRequest {
+            subscription_id,
+            world_addresses: world_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            namespaces,
+            caller_addresses: caller_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+        };
+        self.inner
+            .update_activities_subscription(request)
+            .await
+            .map_err(Error::Grpc)?;
+        Ok(())
+    }
+
+    pub async fn retrieve_achievements(
+        &mut self,
+        query: AchievementQuery,
+    ) -> Result<RetrieveAchievementsResponse, Error> {
+        self.inner
+            .retrieve_achievements(RetrieveAchievementsRequest {
+                query: Some(query.into()),
+            })
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())
+    }
+
+    pub async fn retrieve_player_achievements(
+        &mut self,
+        query: PlayerAchievementQuery,
+    ) -> Result<RetrievePlayerAchievementsResponse, Error> {
+        self.inner
+            .retrieve_player_achievements(RetrievePlayerAchievementsRequest {
+                query: Some(query.into()),
+            })
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())
+    }
+
+    pub async fn subscribe_achievement_progressions(
+        &mut self,
+        world_addresses: Vec<Felt>,
+        namespaces: Vec<String>,
+        player_addresses: Vec<Felt>,
+        achievement_ids: Vec<String>,
+    ) -> Result<AchievementProgressionUpdateStreaming, Error> {
+        let request = SubscribeAchievementProgressionsRequest {
+            world_addresses: world_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            namespaces,
+            player_addresses: player_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            achievement_ids,
+        };
+        let stream = self
+            .inner
+            .subscribe_achievement_progressions(request)
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())?;
+        Ok(AchievementProgressionUpdateStreaming(stream.map_ok(
+            Box::new(|res| {
+                (
+                    res.subscription_id,
+                    res.progression
+                        .map_or_else(torii_proto::AchievementProgression::default, |p| {
+                            p.try_into().expect("must able to serialize")
+                        }),
+                )
+            }),
+        )))
+    }
+
+    pub async fn update_achievement_progressions_subscription(
+        &mut self,
+        subscription_id: u64,
+        world_addresses: Vec<Felt>,
+        namespaces: Vec<String>,
+        player_addresses: Vec<Felt>,
+        achievement_ids: Vec<String>,
+    ) -> Result<(), Error> {
+        let request = UpdateAchievementProgressionsSubscriptionRequest {
+            subscription_id,
+            world_addresses: world_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            namespaces,
+            player_addresses: player_addresses
+                .into_iter()
+                .map(|a| a.to_bytes_be().to_vec())
+                .collect(),
+            achievement_ids,
+        };
+        self.inner
+            .update_achievement_progressions_subscription(request)
+            .await
+            .map_err(Error::Grpc)?;
+        Ok(())
+    }
+
+    pub async fn subscribe_aggregations(
+        &mut self,
+        aggregator_ids: Vec<String>,
+        entity_ids: Vec<String>,
+    ) -> Result<AggregationUpdateStreaming, Error> {
+        let request = SubscribeAggregationsRequest {
+            aggregator_ids,
+            entity_ids,
+        };
+        let stream = self
+            .inner
+            .subscribe_aggregations(request)
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| res.into_inner())?;
+        Ok(AggregationUpdateStreaming(stream.map_ok(Box::new(|res| {
+            (
+                res.subscription_id,
+                res.entry
+                    .map_or_else(torii_proto::AggregationEntry::default, |e| {
+                        e.try_into().expect("must able to serialize")
+                    }),
+            )
+        }))))
+    }
+
+    pub async fn update_aggregations_subscription(
+        &mut self,
+        subscription_id: u64,
+        aggregator_ids: Vec<String>,
+        entity_ids: Vec<String>,
+    ) -> Result<(), Error> {
+        let request = UpdateAggregationsSubscriptionRequest {
+            subscription_id,
+            aggregator_ids,
+            entity_ids,
+        };
+        self.inner
+            .update_aggregations_subscription(request)
+            .await
+            .map_err(Error::Grpc)?;
+        Ok(())
     }
 
     pub async fn subscribe_transactions(
@@ -390,7 +615,7 @@ impl WorldClient {
         &mut self,
         query: Query,
     ) -> Result<RetrieveEntitiesResponse, Error> {
-        let request = RetrieveEventMessagesRequest {
+        let request = RetrieveEntitiesRequest {
             query: Some(query.into()),
         };
         self.inner
@@ -439,11 +664,16 @@ impl WorldClient {
     pub async fn subscribe_entities(
         &mut self,
         clause: Option<Clause>,
+        world_addresses: Vec<Felt>,
     ) -> Result<EntityUpdateStreaming, Error> {
         let stream = self
             .inner
             .subscribe_entities(SubscribeEntitiesRequest {
                 clause: clause.map(|c| c.into()),
+                world_addresses: world_addresses
+                    .into_iter()
+                    .map(|w| w.to_bytes_be().to_vec())
+                    .collect(),
             })
             .await
             .map_err(Error::Grpc)
@@ -465,11 +695,16 @@ impl WorldClient {
         &mut self,
         subscription_id: u64,
         clause: Option<Clause>,
+        world_addresses: Vec<Felt>,
     ) -> Result<(), Error> {
         self.inner
             .update_entities_subscription(UpdateEntitiesSubscriptionRequest {
                 subscription_id,
                 clause: clause.map(|c| c.into()),
+                world_addresses: world_addresses
+                    .into_iter()
+                    .map(|w| w.to_bytes_be().to_vec())
+                    .collect(),
             })
             .await
             .map_err(Error::Grpc)
@@ -480,11 +715,16 @@ impl WorldClient {
     pub async fn subscribe_event_messages(
         &mut self,
         clause: Option<Clause>,
+        world_addresses: Vec<Felt>,
     ) -> Result<EntityUpdateStreaming, Error> {
         let stream = self
             .inner
-            .subscribe_event_messages(SubscribeEventMessagesRequest {
+            .subscribe_event_messages(SubscribeEntitiesRequest {
                 clause: clause.map(|c| c.into()),
+                world_addresses: world_addresses
+                    .into_iter()
+                    .map(|w| w.to_bytes_be().to_vec())
+                    .collect(),
             })
             .await
             .map_err(Error::Grpc)
@@ -506,11 +746,16 @@ impl WorldClient {
         &mut self,
         subscription_id: u64,
         clause: Option<Clause>,
+        world_addresses: Vec<Felt>,
     ) -> Result<(), Error> {
         self.inner
-            .update_event_messages_subscription(UpdateEventMessagesSubscriptionRequest {
+            .update_event_messages_subscription(UpdateEntitiesSubscriptionRequest {
                 subscription_id,
                 clause: clause.map(|c| c.into()),
+                world_addresses: world_addresses
+                    .into_iter()
+                    .map(|w| w.to_bytes_be().to_vec())
+                    .collect(),
             })
             .await
             .map_err(Error::Grpc)
@@ -603,7 +848,7 @@ impl WorldClient {
             .map(|res| res.into_inner())
     }
 
-    pub async fn publish_message(&mut self, message: Message) -> Result<Felt, Error> {
+    pub async fn publish_message(&mut self, message: Message) -> Result<String, Error> {
         self.inner
             .publish_message(PublishMessageRequest {
                 message: message.message,
@@ -612,16 +857,17 @@ impl WorldClient {
                     .into_iter()
                     .map(|s| s.to_bytes_be().to_vec())
                     .collect(),
+                world_address: message.world_address.to_bytes_be().to_vec(),
             })
             .await
             .map_err(Error::Grpc)
-            .map(|res| Felt::from_bytes_be_slice(&res.into_inner().entity_id))
+            .map(|res| res.into_inner().id)
     }
 
     pub async fn publish_message_batch(
         &mut self,
         messages: Vec<Message>,
-    ) -> Result<Vec<Felt>, Error> {
+    ) -> Result<Vec<String>, Error> {
         self.inner
             .publish_message_batch(PublishMessageBatchRequest {
                 messages: messages
@@ -633,6 +879,7 @@ impl WorldClient {
                             .map(|s| s.to_bytes_be().to_vec())
                             .collect(),
                         message: m.message.clone(),
+                        world_address: m.world_address.to_bytes_be().to_vec(),
                     })
                     .collect(),
             })
@@ -641,9 +888,49 @@ impl WorldClient {
             .map(|res| {
                 res.into_inner()
                     .responses
-                    .iter()
-                    .map(|r| Felt::from_bytes_be_slice(&r.entity_id))
+                    .into_iter()
+                    .map(|r| r.id)
                     .collect()
+            })
+    }
+
+    /// Execute a SQL query against the Torii database.
+    /// Returns the query results as rows.
+    pub async fn execute_sql(&mut self, query: String) -> Result<Vec<SqlRow>, Error> {
+        self.inner
+            .execute_sql(torii_proto::proto::types::SqlQueryRequest { query })
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| {
+                res.into_inner()
+                    .rows
+                    .into_iter()
+                    .map(|r| r.into())
+                    .collect()
+            })
+    }
+
+    /// Perform a full-text search across indexed entities.
+    /// Returns search results grouped by table with relevance scores.
+    pub async fn search(
+        &mut self,
+        query: SearchQuery,
+    ) -> Result<torii_proto::SearchResponse, Error> {
+        let request = SearchRequest {
+            query: Some(query.into()),
+        };
+        self.inner
+            .search(request)
+            .await
+            .map_err(Error::Grpc)
+            .map(|res| {
+                res.into_inner()
+                    .response
+                    .map(|r| r.into())
+                    .unwrap_or_else(|| torii_proto::SearchResponse {
+                        total: 0,
+                        results: vec![],
+                    })
             })
     }
 }
@@ -768,6 +1055,68 @@ pub struct TransactionUpdateStreaming(TransactionMappedStream);
 
 impl Stream for TransactionUpdateStreaming {
     type Item = <TransactionMappedStream as Stream>::Item;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_next_unpin(cx)
+    }
+}
+
+type AggregationMappedStream = MapOk<
+    tonic::Streaming<SubscribeAggregationsResponse>,
+    Box<
+        dyn Fn(SubscribeAggregationsResponse) -> (SubscriptionId, torii_proto::AggregationEntry)
+            + Send,
+    >,
+>;
+
+#[derive(Debug)]
+pub struct AggregationUpdateStreaming(AggregationMappedStream);
+
+impl Stream for AggregationUpdateStreaming {
+    type Item = <AggregationMappedStream as Stream>::Item;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_next_unpin(cx)
+    }
+}
+
+type ActivityMappedStream = MapOk<
+    tonic::Streaming<SubscribeActivitiesResponse>,
+    Box<dyn Fn(SubscribeActivitiesResponse) -> (SubscriptionId, torii_proto::Activity) + Send>,
+>;
+
+#[derive(Debug)]
+pub struct ActivityUpdateStreaming(ActivityMappedStream);
+
+impl Stream for ActivityUpdateStreaming {
+    type Item = <ActivityMappedStream as Stream>::Item;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.0.poll_next_unpin(cx)
+    }
+}
+
+type AchievementProgressionMappedStream = MapOk<
+    tonic::Streaming<SubscribeAchievementProgressionsResponse>,
+    Box<
+        dyn Fn(
+                SubscribeAchievementProgressionsResponse,
+            ) -> (SubscriptionId, torii_proto::AchievementProgression)
+            + Send,
+    >,
+>;
+
+#[derive(Debug)]
+pub struct AchievementProgressionUpdateStreaming(AchievementProgressionMappedStream);
+
+impl Stream for AchievementProgressionUpdateStreaming {
+    type Item = <AchievementProgressionMappedStream as Stream>::Item;
     fn poll_next(
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

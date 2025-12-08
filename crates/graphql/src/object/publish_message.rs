@@ -54,6 +54,10 @@ impl PublishMessageObject {
                     let signature_strings =
                         extract::<Vec<String>>(ctx.args.as_index_map(), "signature")?;
                     let message = extract::<String>(ctx.args.as_index_map(), "message")?;
+                    let world_address = Felt::from_str(&extract::<String>(
+                        ctx.args.as_index_map(),
+                        "worldAddress",
+                    )?)?;
 
                     // Convert signature strings to Felt
                     let signature = signature_strings
@@ -75,22 +79,23 @@ impl PublishMessageObject {
 
                     // Validate and set entity
                     let entity_id = messaging
-                        .validate_and_set_entity(&typed_data, &signature)
+                        .validate_and_set_entity(world_address, &typed_data, &signature)
                         .await
                         .map_err(|e| {
                             async_graphql::Error::new(format!("Failed to publish message: {}", e))
                         })?;
 
                     // Create response
-                    let response = ValueMapping::from([(
-                        Name::new("entityId"),
-                        Value::from(format!("{:#x}", entity_id)),
-                    )]);
+                    let response = ValueMapping::from([(Name::new("id"), Value::from(entity_id))]);
 
                     Ok(Some(Value::Object(response)))
                 })
             },
         )
+        .argument(InputValue::new(
+            "worldAddress",
+            TypeRef::named_nn(TypeRef::STRING),
+        ))
         .argument(InputValue::new(
             "signature",
             TypeRef::named_nn_list(TypeRef::STRING),
