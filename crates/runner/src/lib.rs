@@ -676,6 +676,8 @@ impl Runner {
                         .iter()
                         .filter_map(|s| Felt::from_hex(s.trim()).ok())
                         .collect(),
+                    metadata_updates_only_at_head: self.args.erc.metadata_updates_only_at_head,
+                    async_metadata_updates: self.args.erc.async_metadata_updates,
                 },
                 world_block: self.args.indexing.world_block,
             },
