@@ -45,15 +45,8 @@ pub fn parse_event_id(event_id: &str) -> (BlockNumber, TransactionHash, Contract
 /// let scoped_id = format_world_scoped_id(&world_addr, &entity_id);
 /// // Returns: "0x0000...1234:0x0000...5678" (with full padding)
 /// ```
-// pub fn format_world_scoped_id(world_address: &Felt, selector: &Felt) -> String {
-//     format!("{:#064x}:{:#064x}", world_address, selector)
-// }
-
-pub fn format_world_scoped_id(_world_address: &Felt, selector: &Felt) -> String {
-    format!(
-        "0x0000000000000000000000000000000000000000000000000000000000000000:{:#064x}",
-        selector
-    )
+pub fn format_world_scoped_id(world_address: &Felt, selector: &Felt) -> String {
+    format!("{:#064x}:{:#064x}", world_address, selector)
 }
 
 /// Parses a world-scoped identifier into its components.
